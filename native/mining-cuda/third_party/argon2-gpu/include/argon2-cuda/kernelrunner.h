@@ -15,6 +15,8 @@
 namespace argon2 {
 namespace cuda {
 
+struct DifficultyCheckResult;
+
 class KernelRunner
 {
 private:
@@ -28,6 +30,8 @@ private:
     cudaStream_t stream;
     void *memory;
     void *refs;
+    DifficultyCheckResult *difficultyResultDevice;
+    std::unique_ptr<DifficultyCheckResult> difficultyResultHost;
 
     std::unique_ptr<std::uint8_t[]> blocksIn;
     std::unique_ptr<std::uint8_t[]> blocksOut;
@@ -42,6 +46,7 @@ private:
                           std::uint32_t pass, std::uint32_t slice);
     void runKernelOneshot(std::uint32_t lanesPerBlock,
                           std::size_t jobsPerBlock);
+    void runDifficultyCheckKernel(int difficultyBits);
 
 public:
     std::uint32_t getMinLanesPerBlock() const { return bySegment ? 1 : lanes; }
@@ -62,7 +67,11 @@ public:
     const void *getOutputMemory(std::size_t jobId) const;
 
     void run(std::uint32_t lanesPerBlock, std::size_t jobsPerBlock);
+    void runWithDifficultyCheck(std::uint32_t lanesPerBlock,
+                                std::size_t jobsPerBlock,
+                                int difficultyBits);
     float finish();
+    bool getDifficultyResult(std::size_t *jobId, void *hash) const;
 };
 
 } // cuda

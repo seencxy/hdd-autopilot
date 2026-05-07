@@ -366,6 +366,128 @@ impl CudaBackend {
         config: GpuBenchmarkConfig,
         cancel: &Arc<AtomicBool>,
     ) -> Result<BenchmarkResult, MiningError> {
+        self.run_runtime_loop_benchmark_with_sessions_and_cancel(job, config, 1, cancel)
+    }
+
+    pub fn run_runtime_loop_benchmark_with_sessions_and_cancel(
+        &self,
+        job: &ComputeJob,
+        config: GpuBenchmarkConfig,
+        session_count: usize,
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<BenchmarkResult, MiningError> {
+        let GpuBenchmarkConfig {
+            device_index,
+            batch_size,
+            by_segment,
+            precompute_refs,
+            duration,
+        } = config;
+        let session_count = session_count.max(1);
+        if session_count <= 1 {
+            return self.run_single_session_runtime_loop_benchmark_with_cancel(job, config, cancel);
+        }
+        cuda_sys::validate().map_err(MiningError::Message)?;
+        let benchmark_job = benchmark_job_for_tuning(job);
+        let mut sessions = create_cuda_sessions(
+            device_index,
+            &benchmark_job,
+            batch_size.max(1),
+            session_count,
+            by_segment,
+            precompute_refs,
+            1,
+            u64::MAX / 2,
+        )?;
+        let started = std::time::Instant::now();
+        let attempts = Arc::new(AtomicI64::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (sender, receiver) = mpsc::channel();
+        let mut handles = Vec::with_capacity(sessions.len());
+        for mut session in sessions.drain(..) {
+            let attempts = Arc::clone(&attempts);
+            let cancel = Arc::clone(cancel);
+            let stop = Arc::clone(&stop);
+            let sender = sender.clone();
+            handles.push(thread::spawn(move || {
+                let mut last_attempts = 0i64;
+                while started.elapsed() < duration {
+                    if cancel.load(Ordering::SeqCst) {
+                        stop.store(true, Ordering::SeqCst);
+                        let _ = sender.send(CudaWorkerMessage::Error(interrupted_error()));
+                        return;
+                    }
+                    if stop.load(Ordering::SeqCst) {
+                        let _ = sender.send(CudaWorkerMessage::Done);
+                        return;
+                    }
+                    let result = match session.mine_next_batch() {
+                        Ok(result) => result,
+                        Err(error) => {
+                            stop.store(true, Ordering::SeqCst);
+                            let _ =
+                                sender.send(CudaWorkerMessage::Error(MiningError::Message(error)));
+                            return;
+                        }
+                    };
+                    let delta = result.attempts.saturating_sub(last_attempts);
+                    if delta > 0 {
+                        attempts.fetch_add(delta, Ordering::Relaxed);
+                        last_attempts = result.attempts;
+                    }
+                    if result.found {
+                        stop.store(true, Ordering::SeqCst);
+                        let _ = sender.send(CudaWorkerMessage::Done);
+                        return;
+                    }
+                }
+                let _ = sender.send(CudaWorkerMessage::Done);
+            }));
+        }
+        drop(sender);
+
+        let mut completed = 0usize;
+        let mut first_error = None;
+        while completed < handles.len() {
+            match receiver.recv() {
+                Ok(CudaWorkerMessage::Done) | Ok(CudaWorkerMessage::Found { .. }) => {
+                    completed += 1;
+                }
+                Ok(CudaWorkerMessage::Error(error)) => {
+                    completed += 1;
+                    stop.store(true, Ordering::SeqCst);
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        for handle in handles {
+            let _ = handle.join();
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        let elapsed = started.elapsed();
+        let attempts = attempts.load(Ordering::Relaxed);
+        Ok(BenchmarkResult {
+            workers: batch_size.max(1),
+            concurrency: batch_size.max(1),
+            by_segment,
+            precompute_refs,
+            attempts,
+            elapsed,
+            attempts_per_s: attempts as f64 / elapsed.as_secs_f64().max(0.001),
+        })
+    }
+
+    fn run_single_session_runtime_loop_benchmark_with_cancel(
+        &self,
+        job: &ComputeJob,
+        config: GpuBenchmarkConfig,
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<BenchmarkResult, MiningError> {
         let GpuBenchmarkConfig {
             device_index,
             batch_size,

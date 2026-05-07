@@ -84,25 +84,32 @@ impl SelectedBackend {
         if self.kind != BackendKind::Cuda {
             return 1;
         }
-        let Some(profile) = self.gpu_profile else {
-            return 1;
-        };
-        let batch_size = self.profile.concurrency.max(1);
-        let compute_units = profile.compute_units as usize;
-        if compute_units == 0 {
-            return 1;
-        }
-        let needed_for_sm_coverage = compute_units.div_ceil(batch_size).clamp(1, 4);
-        let per_session_bytes =
-            estimated_argon2_batch_memory_bytes(job.memory_cost_kib, batch_size);
-        let usable_bytes = if profile.global_memory_bytes > 0 {
-            u128::from(profile.global_memory_bytes) * 90 / 100
-        } else {
-            per_session_bytes
-        };
-        let max_by_memory = (usable_bytes / per_session_bytes).clamp(1, 4) as usize;
-        needed_for_sm_coverage.min(max_by_memory).max(1)
+        recommended_cuda_session_count(self.gpu_profile, job, self.profile.concurrency.max(1))
     }
+}
+
+pub(super) fn recommended_cuda_session_count(
+    profile: Option<GpuDeviceProfile>,
+    job: &ComputeJob,
+    batch_size: usize,
+) -> usize {
+    let Some(profile) = profile else {
+        return 1;
+    };
+    let batch_size = batch_size.max(1);
+    let compute_units = profile.compute_units as usize;
+    if compute_units == 0 {
+        return 1;
+    }
+    let needed_for_sm_coverage = compute_units.div_ceil(batch_size).clamp(1, 4);
+    let per_session_bytes = estimated_argon2_batch_memory_bytes(job.memory_cost_kib, batch_size);
+    let usable_bytes = if profile.global_memory_bytes > 0 {
+        u128::from(profile.global_memory_bytes) * 90 / 100
+    } else {
+        per_session_bytes
+    };
+    let max_by_memory = (usable_bytes / per_session_bytes).clamp(1, 4) as usize;
+    needed_for_sm_coverage.min(max_by_memory).max(1)
 }
 
 pub(super) fn select_best_backend_by_kind(

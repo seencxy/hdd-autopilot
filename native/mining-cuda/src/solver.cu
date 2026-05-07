@@ -219,7 +219,7 @@ SolveResult Solver::mine_next_batch(const Job& job,
 
     const auto current_start_nonce = session.next_nonce;
     const auto next_start_nonce = current_start_nonce + session.config.batch_size;
-    state.prepared->unit->beginProcessing();
+    state.prepared->unit->beginProcessingWithDifficultyCheck(job.difficulty_bits());
     if (!stop.load(std::memory_order_relaxed)) {
         // The ProcessingUnit API allows staging the next input batch after
         // beginProcessing(), while the CUDA stream works on the current batch.
@@ -228,26 +228,19 @@ SolveResult Solver::mine_next_batch(const Job& job,
     state.prepared->unit->endProcessing();
 
     BatchResult batch;
-    std::int64_t local_attempts = 0;
-    for (std::size_t i = 0; i < session.config.batch_size; ++i) {
-        if (stop.load(std::memory_order_relaxed)) {
-            break;
-        }
-
+    if (!stop.load(std::memory_order_relaxed)) {
+        std::size_t hit_index = 0;
         std::array<std::uint8_t, kDigestSize> digest{};
-        state.prepared->unit->getHash(i, digest.data());
-        ++local_attempts;
-        if (meets_difficulty(digest.data(), digest.size(), job.difficulty_bits())) {
+        if (state.prepared->unit->getDifficultyResult(&hit_index, digest.data())) {
             batch.found = true;
-            batch.nonce = current_start_nonce + i;
+            batch.nonce = current_start_nonce + hit_index;
             batch.digest = digest;
             stop.store(true, std::memory_order_relaxed);
-            break;
         }
     }
-    if (local_attempts > 0) {
-        attempts.fetch_add(local_attempts, std::memory_order_relaxed);
-    }
+    attempts.fetch_add(
+        static_cast<std::int64_t>(session.config.batch_size),
+        std::memory_order_relaxed);
 
     session.next_nonce = next_start_nonce;
     SolveResult result;

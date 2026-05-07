@@ -5,7 +5,10 @@ use crate::error::is_interrupted_error;
 use crate::{MiningError, humanize_error};
 
 use super::Runner;
-use super::support::{BenchmarkKey, SelectedBackend, format_memory_bytes, localized_bool};
+use super::support::{
+    BenchmarkKey, SelectedBackend, format_memory_bytes, localized_bool,
+    recommended_cuda_session_count,
+};
 
 const GPU_LARGE_BATCH_SPEED_FLOOR_RATIO: f64 = 0.90;
 const GPU_TUNING_MIN_CASES: usize = 12;
@@ -251,17 +254,21 @@ impl Runner {
             .cuda_backend
             .solver_templates_for_descriptor(descriptor, job);
         self.tune_gpu_backend("CUDA", descriptor, job, &templates, |candidate| {
-            self.cuda_backend.run_runtime_loop_benchmark_with_cancel(
-                job,
-                GpuBenchmarkConfig {
-                    device_index: descriptor.device_index.unwrap_or(0),
-                    batch_size: candidate.batch_size,
-                    by_segment: candidate.by_segment,
-                    precompute_refs: candidate.precompute_refs,
-                    duration: GPU_RUNTIME_BENCHMARK_DURATION,
-                },
-                &self.cancel,
-            )
+            let session_count =
+                recommended_cuda_session_count(descriptor.gpu_profile, job, candidate.batch_size);
+            self.cuda_backend
+                .run_runtime_loop_benchmark_with_sessions_and_cancel(
+                    job,
+                    GpuBenchmarkConfig {
+                        device_index: descriptor.device_index.unwrap_or(0),
+                        batch_size: candidate.batch_size,
+                        by_segment: candidate.by_segment,
+                        precompute_refs: candidate.precompute_refs,
+                        duration: GPU_RUNTIME_BENCHMARK_DURATION,
+                    },
+                    session_count,
+                    &self.cancel,
+                )
         })
     }
 

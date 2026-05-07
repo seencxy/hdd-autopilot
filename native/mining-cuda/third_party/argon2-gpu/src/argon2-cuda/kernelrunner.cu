@@ -326,6 +326,285 @@ struct ref {
     uint32_t ref_index;
 };
 
+struct DifficultyCheckResult {
+    uint32_t found;
+    uint32_t job_id;
+    uint8_t digest[32];
+};
+
+__device__ __constant__ uint64_t blake2b_iv_device[8] = {
+    UINT64_C(0x6a09e667f3bcc908), UINT64_C(0xbb67ae8584caa73b),
+    UINT64_C(0x3c6ef372fe94f82b), UINT64_C(0xa54ff53a5f1d36f1),
+    UINT64_C(0x510e527fade682d1), UINT64_C(0x9b05688c2b3e6c1f),
+    UINT64_C(0x1f83d9abfb41bd6b), UINT64_C(0x5be0cd19137e2179)
+};
+
+__device__ __constant__ uint8_t blake2b_sigma_device[12][16] = {
+    {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},
+    {14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3},
+    {11, 8, 12, 0, 5, 2, 15, 13, 10, 14, 3, 6, 7, 1, 9, 4},
+    {7, 9, 3, 1, 13, 12, 11, 14, 2, 6, 5, 10, 4, 0, 15, 8},
+    {9, 0, 5, 7, 2, 4, 10, 15, 14, 1, 11, 12, 6, 8, 3, 13},
+    {2, 12, 6, 10, 0, 11, 8, 3, 4, 13, 7, 5, 15, 14, 1, 9},
+    {12, 5, 1, 15, 14, 13, 4, 10, 0, 7, 6, 3, 9, 2, 8, 11},
+    {13, 11, 7, 14, 12, 1, 3, 9, 5, 0, 15, 4, 8, 6, 2, 10},
+    {6, 15, 14, 9, 11, 3, 0, 8, 12, 2, 13, 7, 1, 4, 10, 5},
+    {10, 2, 8, 4, 7, 6, 1, 5, 15, 11, 9, 14, 3, 12, 13, 0},
+    {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},
+    {14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3},
+};
+
+struct Blake2bDeviceState {
+    uint64_t h[8];
+    uint64_t t[2];
+    uint8_t buf[128];
+    size_t buf_len;
+};
+
+__device__ uint64_t blake2b_load64_device(const uint8_t *src)
+{
+    uint64_t res = src[0];
+    res |= static_cast<uint64_t>(src[1]) << 8;
+    res |= static_cast<uint64_t>(src[2]) << 16;
+    res |= static_cast<uint64_t>(src[3]) << 24;
+    res |= static_cast<uint64_t>(src[4]) << 32;
+    res |= static_cast<uint64_t>(src[5]) << 40;
+    res |= static_cast<uint64_t>(src[6]) << 48;
+    res |= static_cast<uint64_t>(src[7]) << 56;
+    return res;
+}
+
+__device__ void blake2b_store32_device(uint8_t *dst, uint32_t v)
+{
+    dst[0] = static_cast<uint8_t>(v);
+    dst[1] = static_cast<uint8_t>(v >> 8);
+    dst[2] = static_cast<uint8_t>(v >> 16);
+    dst[3] = static_cast<uint8_t>(v >> 24);
+}
+
+__device__ void blake2b_store64_device(uint8_t *dst, uint64_t v)
+{
+    dst[0] = static_cast<uint8_t>(v);
+    dst[1] = static_cast<uint8_t>(v >> 8);
+    dst[2] = static_cast<uint8_t>(v >> 16);
+    dst[3] = static_cast<uint8_t>(v >> 24);
+    dst[4] = static_cast<uint8_t>(v >> 32);
+    dst[5] = static_cast<uint8_t>(v >> 40);
+    dst[6] = static_cast<uint8_t>(v >> 48);
+    dst[7] = static_cast<uint8_t>(v >> 56);
+}
+
+__device__ __forceinline__ void blake2b_g_device(
+        const uint64_t *m, uint64_t *v, uint32_t r, uint32_t i,
+        uint32_t a, uint32_t b, uint32_t c, uint32_t d)
+{
+    a &= 15;
+    b &= 15;
+    c &= 15;
+    d &= 15;
+    v[a] = v[a] + v[b] + m[blake2b_sigma_device[r][2 * i + 0]];
+    v[d] = rotr64(v[d] ^ v[a], 32);
+    v[c] = v[c] + v[d];
+    v[b] = rotr64(v[b] ^ v[c], 24);
+    v[a] = v[a] + v[b] + m[blake2b_sigma_device[r][2 * i + 1]];
+    v[d] = rotr64(v[d] ^ v[a], 16);
+    v[c] = v[c] + v[d];
+    v[b] = rotr64(v[b] ^ v[c], 63);
+}
+
+__device__ __forceinline__ void blake2b_round_device(
+        const uint64_t *m, uint64_t *v, uint32_t r)
+{
+    blake2b_g_device(m, v, r, 0, 0, 4, 8, 12);
+    blake2b_g_device(m, v, r, 1, 1, 5, 9, 13);
+    blake2b_g_device(m, v, r, 2, 2, 6, 10, 14);
+    blake2b_g_device(m, v, r, 3, 3, 7, 11, 15);
+    blake2b_g_device(m, v, r, 4, 0, 5, 10, 15);
+    blake2b_g_device(m, v, r, 5, 1, 6, 11, 12);
+    blake2b_g_device(m, v, r, 6, 2, 7, 8, 13);
+    blake2b_g_device(m, v, r, 7, 3, 4, 9, 14);
+}
+
+__device__ void blake2b_compress_device(
+        Blake2bDeviceState *state, const uint8_t *block, uint64_t f0)
+{
+    uint64_t m[16];
+    uint64_t v[16];
+
+    for (uint32_t i = 0; i < 16; ++i) {
+        m[i] = blake2b_load64_device(block + i * sizeof(uint64_t));
+    }
+
+    v[0] = state->h[0];
+    v[1] = state->h[1];
+    v[2] = state->h[2];
+    v[3] = state->h[3];
+    v[4] = state->h[4];
+    v[5] = state->h[5];
+    v[6] = state->h[6];
+    v[7] = state->h[7];
+    v[8] = blake2b_iv_device[0];
+    v[9] = blake2b_iv_device[1];
+    v[10] = blake2b_iv_device[2];
+    v[11] = blake2b_iv_device[3];
+    v[12] = blake2b_iv_device[4] ^ state->t[0];
+    v[13] = blake2b_iv_device[5] ^ state->t[1];
+    v[14] = blake2b_iv_device[6] ^ f0;
+    v[15] = blake2b_iv_device[7];
+
+    for (uint32_t r = 0; r < 12; ++r) {
+        blake2b_round_device(m, v, r);
+    }
+
+    for (uint32_t i = 0; i < 8; ++i) {
+        state->h[i] ^= v[i] ^ v[i + 8];
+    }
+}
+
+__device__ void blake2b_increment_counter_device(
+        Blake2bDeviceState *state, uint64_t inc)
+{
+    state->t[0] += inc;
+    state->t[1] += state->t[0] < inc;
+}
+
+__device__ void blake2b_init_device(Blake2bDeviceState *state, uint32_t out_len)
+{
+    state->t[0] = 0;
+    state->t[1] = 0;
+    state->buf_len = 0;
+    for (uint32_t i = 0; i < 8; ++i) {
+        state->h[i] = blake2b_iv_device[i];
+    }
+    state->h[0] ^= static_cast<uint64_t>(out_len)
+            | (UINT64_C(1) << 16) | (UINT64_C(1) << 24);
+}
+
+__device__ void blake2b_update_device(
+        Blake2bDeviceState *state, const uint8_t *input, size_t input_len)
+{
+    if (state->buf_len + input_len > 128) {
+        const size_t left = 128 - state->buf_len;
+        for (size_t i = 0; i < left; ++i) {
+            state->buf[state->buf_len + i] = input[i];
+        }
+        blake2b_increment_counter_device(state, 128);
+        blake2b_compress_device(state, state->buf, 0);
+
+        state->buf_len = 0;
+        input_len -= left;
+        input += left;
+
+        while (input_len > 128) {
+            blake2b_increment_counter_device(state, 128);
+            blake2b_compress_device(state, input, 0);
+            input_len -= 128;
+            input += 128;
+        }
+    }
+
+    for (size_t i = 0; i < input_len; ++i) {
+        state->buf[state->buf_len + i] = input[i];
+    }
+    state->buf_len += input_len;
+}
+
+__device__ void blake2b_final_device(
+        Blake2bDeviceState *state, uint8_t *output, uint32_t output_len)
+{
+    uint8_t buffer[64];
+    for (uint32_t i = 0; i < sizeof(buffer); ++i) {
+        buffer[i] = 0;
+    }
+
+    blake2b_increment_counter_device(state, state->buf_len);
+    for (size_t i = state->buf_len; i < 128; ++i) {
+        state->buf[i] = 0;
+    }
+    blake2b_compress_device(state, state->buf, UINT64_C(0xFFFFFFFFFFFFFFFF));
+
+    for (uint32_t i = 0; i < 8; ++i) {
+        blake2b_store64_device(buffer + i * sizeof(uint64_t), state->h[i]);
+    }
+    for (uint32_t i = 0; i < output_len; ++i) {
+        output[i] = buffer[i];
+    }
+}
+
+__device__ bool digest_meets_difficulty_device(
+        const uint8_t *digest, uint32_t digest_size, int difficulty_bits)
+{
+    if (difficulty_bits < 0) {
+        return false;
+    }
+
+    const uint32_t full_bytes = static_cast<uint32_t>(difficulty_bits / 8);
+    for (uint32_t i = 0; i < full_bytes; ++i) {
+        if (i >= digest_size || digest[i] != 0) {
+            return false;
+        }
+    }
+
+    const uint32_t remaining_bits = static_cast<uint32_t>(difficulty_bits % 8);
+    if (remaining_bits == 0) {
+        return true;
+    }
+    if (full_bytes >= digest_size) {
+        return false;
+    }
+
+    const uint8_t mask = static_cast<uint8_t>(0xFFu << (8 - remaining_bits));
+    return (digest[full_bytes] & mask) == 0;
+}
+
+__global__ void argon2_finalize_difficulty_kernel(
+        const void *memory, size_t job_size, uint32_t lanes,
+        size_t batch_size, int difficulty_bits,
+        DifficultyCheckResult *result)
+{
+    const uint32_t job_id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (static_cast<size_t>(job_id) >= batch_size) {
+        return;
+    }
+
+    Blake2bDeviceState blake;
+    uint8_t out_len_bytes[4];
+    uint8_t word_bytes[8];
+    uint8_t digest[32];
+    const auto memory_bytes = static_cast<const uint8_t *>(memory);
+    const size_t copy_size = static_cast<size_t>(lanes) * ARGON2_BLOCK_SIZE;
+    const uint8_t *final_blocks =
+            memory_bytes + static_cast<size_t>(job_id) * job_size
+            + job_size - copy_size;
+
+    blake2b_init_device(&blake, sizeof(digest));
+    blake2b_store32_device(out_len_bytes, sizeof(digest));
+    blake2b_update_device(&blake, out_len_bytes, sizeof(out_len_bytes));
+    for (uint32_t word = 0; word < ARGON2_QWORDS_IN_BLOCK; ++word) {
+        uint64_t value = 0;
+        for (uint32_t lane = 0; lane < lanes; ++lane) {
+            value ^= blake2b_load64_device(
+                    final_blocks
+                    + static_cast<size_t>(lane) * ARGON2_BLOCK_SIZE
+                    + static_cast<size_t>(word) * sizeof(uint64_t));
+        }
+        blake2b_store64_device(word_bytes, value);
+        blake2b_update_device(&blake, word_bytes, sizeof(word_bytes));
+    }
+    blake2b_final_device(&blake, digest, sizeof(digest));
+
+    if (!digest_meets_difficulty_device(digest, sizeof(digest), difficulty_bits)) {
+        return;
+    }
+
+    if (atomicCAS(&result->found, 0u, 1u) == 0u) {
+        result->job_id = job_id;
+        for (uint32_t i = 0; i < sizeof(digest); ++i) {
+            result->digest[i] = digest[i];
+        }
+    }
+}
+
 /*
  * Refs hierarchy:
  * lanes -> passes -> slices -> blocks
@@ -803,6 +1082,8 @@ KernelRunner::KernelRunner(uint32_t type, uint32_t version, uint32_t passes,
     : type(type), version(version), passes(passes), lanes(lanes),
       segmentBlocks(segmentBlocks), batchSize(batchSize), bySegment(bySegment),
       precompute(precompute), stream(), memory(), refs(),
+      difficultyResultDevice(),
+      difficultyResultHost(new DifficultyCheckResult{}),
       start(), end(), kernelStart(), kernelEnd(),
       blocksIn(new uint8_t[batchSize * lanes * 2 * ARGON2_BLOCK_SIZE]),
       blocksOut(new uint8_t[batchSize * lanes * ARGON2_BLOCK_SIZE])
@@ -817,6 +1098,8 @@ KernelRunner::KernelRunner(uint32_t type, uint32_t version, uint32_t passes,
 #endif
 
     CudaException::check(cudaMalloc(&memory, memorySize));
+    CudaException::check(cudaMalloc(&difficultyResultDevice,
+                                    sizeof(DifficultyCheckResult)));
 
     CudaException::check(cudaEventCreate(&start));
     CudaException::check(cudaEventCreate(&end));
@@ -888,6 +1171,9 @@ KernelRunner::~KernelRunner()
     if (refs != nullptr) {
         cudaFree(refs);
     }
+    if (difficultyResultDevice != nullptr) {
+        cudaFree(difficultyResultDevice);
+    }
 }
 
 void *KernelRunner::getInputMemory(size_t jobId) const
@@ -926,6 +1212,18 @@ void KernelRunner::copyOutputBlocks()
                              mem + (jobSize - copySize), jobSize,
                              copySize, batchSize, cudaMemcpyDeviceToHost,
                              stream));
+}
+
+void KernelRunner::runDifficultyCheckKernel(int difficultyBits)
+{
+    const size_t jobSize = static_cast<size_t>(lanes) * segmentBlocks
+            * ARGON2_SYNC_POINTS * ARGON2_BLOCK_SIZE;
+    dim3 threads = dim3(128);
+    dim3 blocks = dim3((batchSize + threads.x - 1) / threads.x);
+
+    argon2_finalize_difficulty_kernel<<<blocks, threads, 0, stream>>>(
+        memory, jobSize, lanes, batchSize, difficultyBits,
+        difficultyResultDevice);
 }
 
 void KernelRunner::runKernelSegment(uint32_t lanesPerBlock,
@@ -1116,6 +1414,43 @@ void KernelRunner::run(uint32_t lanesPerBlock, size_t jobsPerBlock)
     CudaException::check(cudaEventRecord(end, stream));
 }
 
+void KernelRunner::runWithDifficultyCheck(
+        uint32_t lanesPerBlock, size_t jobsPerBlock, int difficultyBits)
+{
+    CudaException::check(cudaEventRecord(start, stream));
+
+    CudaException::check(cudaMemsetAsync(difficultyResultDevice, 0,
+                                         sizeof(DifficultyCheckResult),
+                                         stream));
+
+    copyInputBlocks();
+
+    CudaException::check(cudaEventRecord(kernelStart, stream));
+
+    if (bySegment) {
+        for (uint32_t pass = 0; pass < passes; pass++) {
+            for (uint32_t slice = 0; slice < ARGON2_SYNC_POINTS; slice++) {
+                runKernelSegment(lanesPerBlock, jobsPerBlock, pass, slice);
+            }
+        }
+    } else {
+        runKernelOneshot(lanesPerBlock, jobsPerBlock);
+    }
+
+    runDifficultyCheckKernel(difficultyBits);
+
+    CudaException::check(cudaGetLastError());
+
+    CudaException::check(cudaEventRecord(kernelEnd, stream));
+
+    CudaException::check(cudaMemcpyAsync(
+                             difficultyResultHost.get(), difficultyResultDevice,
+                             sizeof(DifficultyCheckResult),
+                             cudaMemcpyDeviceToHost, stream));
+
+    CudaException::check(cudaEventRecord(end, stream));
+}
+
 float KernelRunner::finish()
 {
     float time = 0.0;
@@ -1131,6 +1466,23 @@ float KernelRunner::finish()
 
     CudaException::check(cudaEventElapsedTime(&time, kernelStart, kernelEnd));
     return time;
+}
+
+bool KernelRunner::getDifficultyResult(size_t *jobId, void *hash) const
+{
+    if (difficultyResultHost->found == 0) {
+        return false;
+    }
+    if (jobId != nullptr) {
+        *jobId = difficultyResultHost->job_id;
+    }
+    if (hash != nullptr) {
+        auto out = static_cast<uint8_t *>(hash);
+        for (size_t i = 0; i < sizeof(difficultyResultHost->digest); ++i) {
+            out[i] = difficultyResultHost->digest[i];
+        }
+    }
+    return true;
 }
 
 } // cuda

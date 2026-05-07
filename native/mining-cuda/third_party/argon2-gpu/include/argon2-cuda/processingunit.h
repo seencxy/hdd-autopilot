@@ -39,7 +39,9 @@ public:
     void getHash(std::size_t index, void *hash);
 
     void beginProcessing();
+    void beginProcessingWithDifficultyCheck(int difficultyBits);
     void endProcessing();
+    bool getDifficultyResult(std::size_t *index, void *hash) const;
 };
 
 } // namespace cuda
@@ -72,7 +74,9 @@ public:
     void getHash(std::size_t index, void *hash) { }
 
     void beginProcessing() { }
+    void beginProcessingWithDifficultyCheck(int difficultyBits) { }
     void endProcessing() { }
+    bool getDifficultyResult(std::size_t *index, void *hash) const { return false; }
 };
 
 } // namespace cuda

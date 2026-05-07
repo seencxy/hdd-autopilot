@@ -27,7 +27,7 @@ void clear_last_error() {
     g_last_error.clear();
 }
 
-app::Job benchmark_job() {
+app::JobConfig benchmark_job_config(int difficulty_bits) {
     app::JobConfig config;
     config.seed = "benchmark-seed-fixed";
     config.round_id = 1;
@@ -37,8 +37,48 @@ app::Job benchmark_job() {
     config.time_cost = 1;
     config.memory_cost_mb = 64;
     config.parallelism = 1;
-    config.difficulty_bits = 255;
-    return app::Job(std::move(config));
+    config.difficulty_bits = difficulty_bits;
+    return config;
+}
+
+app::Job benchmark_job() {
+    return app::Job(benchmark_job_config(255));
+}
+
+void validate_mining_path(app::Solver& solver) {
+    auto job_config = benchmark_job_config(0);
+    job_config.memory_cost_mb = 8;
+    auto job = app::Job(std::move(job_config));
+    app::SolverConfig config;
+    config.batch_size = 1;
+    config.by_segment = false;
+    config.precompute_refs = false;
+
+    std::atomic_bool stop{false};
+    std::atomic<std::int64_t> attempts{0};
+    const auto mined = solver.mine_batch(job, config, 1, stop, attempts);
+    if (!mined.found || mined.digest.empty()) {
+        throw std::runtime_error("CUDA difficulty check validation did not return a hit");
+    }
+
+    const auto password = job.password_for_nonce(mined.nonce);
+    std::vector<std::uint8_t> digest(32);
+    const auto result = argon2id_hash_raw(job.time_cost(),
+                                          job.memory_cost_kb(),
+                                          job.parallelism(),
+                                          password.data(),
+                                          password.size(),
+                                          job.seed_bytes().data(),
+                                          job.seed_bytes().size(),
+                                          digest.data(),
+                                          digest.size());
+    if (result != ARGON2_OK) {
+        throw std::runtime_error(argon2_error_message(result));
+    }
+    const auto expected = app::hex_encode(digest.data(), digest.size());
+    if (mined.digest != expected) {
+        throw std::runtime_error("CUDA difficulty check digest mismatch");
+    }
 }
 
 app::Job make_job(const mining_cuda_job& raw) {
@@ -138,6 +178,7 @@ bool mining_cuda_validate() {
         clear_last_error();
         app::Solver solver(0);
         solver.validate_against_reference(benchmark_job(), 1);
+        validate_mining_path(solver);
         return true;
     } catch (const std::exception& error) {
         set_last_error(error);

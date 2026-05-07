@@ -141,9 +141,21 @@ void ProcessingUnit::beginProcessing()
     runner.run(bestLanesPerBlock, bestJobsPerBlock);
 }
 
+void ProcessingUnit::beginProcessingWithDifficultyCheck(int difficultyBits)
+{
+    setCudaDevice(device->getDeviceIndex());
+    runner.runWithDifficultyCheck(bestLanesPerBlock, bestJobsPerBlock,
+                                  difficultyBits);
+}
+
 void ProcessingUnit::endProcessing()
 {
     runner.finish();
+}
+
+bool ProcessingUnit::getDifficultyResult(std::size_t *index, void *hash) const
+{
+    return runner.getDifficultyResult(index, hash);
 }
 
 } // namespace cuda
