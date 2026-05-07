@@ -210,10 +210,15 @@ impl CudaBackend {
     ) -> Vec<CudaSolverConfig> {
         recommended_gpu_tuning_shapes(descriptor.gpu_profile, job.memory_cost_kib, job.parallelism)
             .into_iter()
-            .map(|shape| CudaSolverConfig {
-                batch_size: shape.batch_size,
-                by_segment: shape.by_segment,
-                precompute_refs: shape.precompute_refs,
+            .flat_map(|shape| {
+                [false, true]
+                    .into_iter()
+                    .map(move |generate_passwords_on_gpu| CudaSolverConfig {
+                        batch_size: shape.batch_size,
+                        by_segment: shape.by_segment,
+                        precompute_refs: shape.precompute_refs,
+                        generate_passwords_on_gpu,
+                    })
             })
             .collect()
     }
@@ -302,6 +307,7 @@ impl CudaBackend {
             default_config.batch_size,
             default_config.by_segment,
             default_config.precompute_refs,
+            default_config.generate_passwords_on_gpu,
             GPU_DEVICE_SCREENING_DURATION,
         )
     }
@@ -322,6 +328,7 @@ impl CudaBackend {
                     batch_size: candidate.batch_size,
                     by_segment: candidate.by_segment,
                     precompute_refs: candidate.precompute_refs,
+                    generate_passwords_on_gpu: candidate.generate_passwords_on_gpu,
                     duration: GPU_RUNTIME_BENCHMARK_DURATION,
                 },
                 &cancel,
@@ -345,6 +352,7 @@ impl CudaBackend {
         batch_size: usize,
         by_segment: bool,
         precompute_refs: bool,
+        generate_passwords_on_gpu: bool,
         duration: Duration,
     ) -> Result<BenchmarkResult, MiningError> {
         self.run_runtime_loop_benchmark_with_cancel(
@@ -354,6 +362,7 @@ impl CudaBackend {
                 batch_size,
                 by_segment,
                 precompute_refs,
+                generate_passwords_on_gpu,
                 duration,
             },
             &Arc::new(AtomicBool::new(false)),
@@ -381,6 +390,7 @@ impl CudaBackend {
             batch_size,
             by_segment,
             precompute_refs,
+            generate_passwords_on_gpu,
             duration,
         } = config;
         let session_count = session_count.max(1);
@@ -396,6 +406,7 @@ impl CudaBackend {
             session_count,
             by_segment,
             precompute_refs,
+            generate_passwords_on_gpu,
             1,
             u64::MAX / 2,
         )?;
@@ -476,6 +487,7 @@ impl CudaBackend {
             concurrency: batch_size.max(1),
             by_segment,
             precompute_refs,
+            generate_passwords_on_gpu,
             attempts,
             elapsed,
             attempts_per_s: attempts as f64 / elapsed.as_secs_f64().max(0.001),
@@ -493,6 +505,7 @@ impl CudaBackend {
             batch_size,
             by_segment,
             precompute_refs,
+            generate_passwords_on_gpu,
             duration,
         } = config;
         cuda_sys::validate().map_err(MiningError::Message)?;
@@ -500,6 +513,7 @@ impl CudaBackend {
             batch_size: batch_size.max(1),
             by_segment,
             precompute_refs,
+            generate_passwords_on_gpu,
         };
         let benchmark_job = benchmark_job_for_tuning(job);
         let raw_job = cuda_sys::CudaJob {
@@ -527,6 +541,7 @@ impl CudaBackend {
             concurrency: config.batch_size,
             by_segment: config.by_segment,
             precompute_refs: config.precompute_refs,
+            generate_passwords_on_gpu: config.generate_passwords_on_gpu,
             attempts,
             elapsed,
             attempts_per_s: attempts as f64 / elapsed.as_secs_f64().max(0.001),
@@ -546,6 +561,7 @@ impl CudaBackend {
             session_count,
             by_segment,
             precompute_refs,
+            generate_passwords_on_gpu,
             start_nonce,
             nonce_count,
         } = config;
@@ -560,6 +576,7 @@ impl CudaBackend {
                 requested_sessions,
                 by_segment,
                 precompute_refs,
+                generate_passwords_on_gpu,
                 start_nonce,
                 nonce_count,
             ) {
@@ -591,6 +608,7 @@ fn create_cuda_sessions(
     session_count: usize,
     by_segment: bool,
     precompute_refs: bool,
+    generate_passwords_on_gpu: bool,
     start_nonce: u64,
     nonce_count: u64,
 ) -> Result<Vec<cuda_sys::CudaMiningSession>, MiningError> {
@@ -606,6 +624,7 @@ fn create_cuda_sessions(
         batch_size,
         by_segment,
         precompute_refs,
+        generate_passwords_on_gpu,
     };
     let session_count = session_count.max(1);
     let span = nonce_count.max(session_count as u64) / session_count as u64;

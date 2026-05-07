@@ -169,12 +169,13 @@ impl Runner {
             match screen(&descriptor) {
                 Ok(result) => {
                     self.log(format_args!(
-                        "{} 设备初筛完成：设备 {}，默认批大小 {}，按分段 {}，预计算参考值 {}，预计显存 {}，预计速度约 {:.2} 次/秒。",
+                        "{} 设备初筛完成：设备 {}，默认批大小 {}，按分段 {}，预计算参考值 {}，GPU 生成输入 {}，预计显存 {}，预计速度约 {:.2} 次/秒。",
                         label,
                         descriptor.name,
                         result.workers,
                         localized_bool(result.by_segment),
                         localized_bool(result.precompute_refs),
+                        localized_bool(result.generate_passwords_on_gpu),
                         estimated_gpu_memory_label(job, result.concurrency),
                         result.attempts_per_s
                     ));
@@ -214,12 +215,13 @@ impl Runner {
             match tune(&descriptor) {
                 Ok(result) => {
                     self.log(format_args!(
-                        "{} 自动调优完成：设备 {}，推荐批大小 {}，按分段 {}，预计算参考值 {}，预计显存 {}，预计速度约 {:.2} 次/秒。",
+                        "{} 自动调优完成：设备 {}，推荐批大小 {}，按分段 {}，预计算参考值 {}，GPU 生成输入 {}，预计显存 {}，预计速度约 {:.2} 次/秒。",
                         label,
                         descriptor.name,
                         result.workers,
                         localized_bool(result.by_segment),
                         localized_bool(result.precompute_refs),
+                        localized_bool(result.generate_passwords_on_gpu),
                         estimated_gpu_memory_label(job, result.concurrency),
                         result.attempts_per_s
                     ));
@@ -264,6 +266,7 @@ impl Runner {
                         batch_size: candidate.batch_size,
                         by_segment: candidate.by_segment,
                         precompute_refs: candidate.precompute_refs,
+                        generate_passwords_on_gpu: candidate.generate_passwords_on_gpu,
                         duration: GPU_RUNTIME_BENCHMARK_DURATION,
                     },
                     session_count,
@@ -288,6 +291,7 @@ impl Runner {
                     batch_size: candidate.batch_size,
                     by_segment: candidate.by_segment,
                     precompute_refs: candidate.precompute_refs,
+                    generate_passwords_on_gpu: false,
                     duration: GPU_RUNTIME_BENCHMARK_DURATION,
                 },
                 &self.cancel,
@@ -311,6 +315,7 @@ impl Runner {
                     batch_size: candidate.batch_size,
                     by_segment: candidate.by_segment,
                     precompute_refs: candidate.precompute_refs,
+                    generate_passwords_on_gpu: false,
                     duration: GPU_RUNTIME_BENCHMARK_DURATION,
                 },
                 &self.cancel,
@@ -351,7 +356,7 @@ impl Runner {
                 }
             };
             self.log(format_args!(
-                "{} 自动调优结果 {}/{}：设备 {}，批大小 {}，按分段 {}，预计算参考值 {}，预计显存 {}，速度约 {:.2} 次/秒。",
+                "{} 自动调优结果 {}/{}：设备 {}，批大小 {}，按分段 {}，预计算参考值 {}，GPU 生成输入 {}，预计显存 {}，速度约 {:.2} 次/秒。",
                 label,
                 index + 1,
                 total_cases,
@@ -359,6 +364,7 @@ impl Runner {
                 result.workers,
                 localized_bool(result.by_segment),
                 localized_bool(result.precompute_refs),
+                localized_bool(result.generate_passwords_on_gpu),
                 estimated_gpu_memory_label(job, result.concurrency),
                 result.attempts_per_s
             ));
@@ -488,6 +494,7 @@ mod tests {
             concurrency: batch_size,
             by_segment: true,
             precompute_refs: true,
+            generate_passwords_on_gpu: false,
             attempts: 1,
             elapsed: Duration::from_secs(1),
             attempts_per_s,

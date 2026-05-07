@@ -53,6 +53,7 @@ void validate_mining_path(app::Solver& solver) {
     config.batch_size = 1;
     config.by_segment = false;
     config.precompute_refs = false;
+    config.generate_passwords_on_gpu = true;
 
     std::atomic_bool stop{false};
     std::atomic<std::int64_t> attempts{0};
@@ -103,6 +104,7 @@ app::SolverConfig make_solver_config(const mining_cuda_solver_config& raw) {
     config.batch_size = raw.batch_size;
     config.by_segment = raw.by_segment;
     config.precompute_refs = raw.precompute_refs;
+    config.generate_passwords_on_gpu = raw.generate_passwords_on_gpu;
     return config;
 }
 
@@ -232,6 +234,7 @@ bool mining_cuda_default_solver_config(
         result->batch_size = config.batch_size;
         result->by_segment = config.by_segment;
         result->precompute_refs = config.precompute_refs;
+        result->generate_passwords_on_gpu = config.generate_passwords_on_gpu;
         return true;
     } catch (const std::exception& error) {
         set_last_error(error);
@@ -251,6 +254,7 @@ bool mining_cuda_find_best_benchmark_config(std::size_t device_index, mining_cud
         result->batch_size = best.config.batch_size;
         result->by_segment = best.config.by_segment;
         result->precompute_refs = best.config.precompute_refs;
+        result->generate_passwords_on_gpu = best.config.generate_passwords_on_gpu;
         result->attempts = best.attempts;
         result->elapsed_ms = best.elapsed.count();
         result->attempts_per_second = best.attempts_per_second;

@@ -189,6 +189,7 @@ impl OpenclBackend {
                     batch_size: candidate.batch_size,
                     by_segment: candidate.by_segment,
                     precompute_refs: candidate.precompute_refs,
+                    generate_passwords_on_gpu: false,
                     duration: GPU_RUNTIME_BENCHMARK_DURATION,
                 },
                 &cancel,
@@ -221,6 +222,7 @@ impl OpenclBackend {
                 batch_size,
                 by_segment,
                 precompute_refs,
+                generate_passwords_on_gpu: false,
                 duration,
             },
             &Arc::new(AtomicBool::new(false)),
@@ -238,6 +240,7 @@ impl OpenclBackend {
             batch_size,
             by_segment,
             precompute_refs,
+            generate_passwords_on_gpu: _,
             duration,
         } = config;
         #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -288,6 +291,7 @@ impl OpenclBackend {
                 concurrency: config.batch_size,
                 by_segment: config.by_segment,
                 precompute_refs: config.precompute_refs,
+                generate_passwords_on_gpu: false,
                 attempts,
                 elapsed,
                 attempts_per_s: attempts as f64 / elapsed.as_secs_f64().max(0.001),
@@ -308,6 +312,7 @@ impl OpenclBackend {
             session_count: _,
             by_segment,
             precompute_refs,
+            generate_passwords_on_gpu: _,
             start_nonce,
             nonce_count: _,
         } = config;

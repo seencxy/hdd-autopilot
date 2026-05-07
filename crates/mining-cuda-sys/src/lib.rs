@@ -11,6 +11,7 @@ pub struct mining_cuda_solver_config {
     pub batch_size: usize,
     pub by_segment: bool,
     pub precompute_refs: bool,
+    pub generate_passwords_on_gpu: bool,
 }
 
 #[repr(C)]
@@ -30,6 +31,7 @@ pub struct mining_cuda_benchmark_result {
     pub batch_size: usize,
     pub by_segment: bool,
     pub precompute_refs: bool,
+    pub generate_passwords_on_gpu: bool,
     pub attempts: i64,
     pub elapsed_ms: i64,
     pub attempts_per_second: f64,
@@ -66,6 +68,7 @@ pub struct CudaSolverConfig {
     pub batch_size: usize,
     pub by_segment: bool,
     pub precompute_refs: bool,
+    pub generate_passwords_on_gpu: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -265,6 +268,7 @@ pub fn default_solver_config(
             batch_size: 0,
             by_segment: false,
             precompute_refs: false,
+            generate_passwords_on_gpu: true,
         };
         if !mining_cuda_default_solver_config(device_index, &raw_job, &mut raw_config) {
             return Err(last_error_message());
@@ -273,6 +277,7 @@ pub fn default_solver_config(
             batch_size: raw_config.batch_size,
             by_segment: raw_config.by_segment,
             precompute_refs: raw_config.precompute_refs,
+            generate_passwords_on_gpu: raw_config.generate_passwords_on_gpu,
         })
     }
 }
@@ -289,6 +294,7 @@ pub fn find_best_benchmark_config(device_index: usize) -> Result<CudaBenchmarkRe
             batch_size: 0,
             by_segment: false,
             precompute_refs: false,
+            generate_passwords_on_gpu: true,
             attempts: 0,
             elapsed_ms: 0,
             attempts_per_second: 0.0,
@@ -301,6 +307,7 @@ pub fn find_best_benchmark_config(device_index: usize) -> Result<CudaBenchmarkRe
                 batch_size: raw.batch_size,
                 by_segment: raw.by_segment,
                 precompute_refs: raw.precompute_refs,
+                generate_passwords_on_gpu: raw.generate_passwords_on_gpu,
             },
             attempts: raw.attempts,
             elapsed: Duration::from_millis(raw.elapsed_ms.max(0) as u64),
@@ -336,6 +343,7 @@ pub fn mine_batch(
             batch_size: config.batch_size,
             by_segment: config.by_segment,
             precompute_refs: config.precompute_refs,
+            generate_passwords_on_gpu: config.generate_passwords_on_gpu,
         };
         let mut raw_result = mining_cuda_mine_result {
             found: false,
@@ -394,6 +402,7 @@ pub fn create_session(
             batch_size: config.batch_size,
             by_segment: config.by_segment,
             precompute_refs: config.precompute_refs,
+            generate_passwords_on_gpu: config.generate_passwords_on_gpu,
         };
         let raw = mining_cuda_session_create(device_index, &raw_job, &raw_config, start_nonce);
         if raw.is_null() {

@@ -3,6 +3,7 @@
 
 #if HAVE_CUDA
 
+#include <cstdint>
 #include <memory>
 
 #include "programcontext.h"
@@ -34,12 +35,15 @@ public:
     /* You can safely call this function after the beginProcessing() call to
      * prepare the next batch: */
     void setPassword(std::size_t index, const void *pw, std::size_t pwSize);
+    void setGeneratedPasswordPrefix(const void *prefix, std::size_t prefixSize);
     /* You can safely call this function after the beginProcessing() call to
      * process the previous batch: */
     void getHash(std::size_t index, void *hash);
 
     void beginProcessing();
     void beginProcessingWithDifficultyCheck(int difficultyBits);
+    void beginProcessingWithGeneratedPasswords(std::uint64_t startNonce,
+                                               int difficultyBits);
     void endProcessing();
     bool getDifficultyResult(std::size_t *index, void *hash) const;
 };
@@ -50,6 +54,7 @@ public:
 #else
 
 #include <cstddef>
+#include <cstdint>
 
 #include "programcontext.h"
 #include "argon2-gpu-common/argon2params.h"
@@ -70,11 +75,14 @@ public:
     }
 
     void setPassword(std::size_t index, const void *pw, std::size_t pwSize) { }
+    void setGeneratedPasswordPrefix(const void *prefix, std::size_t prefixSize) { }
 
     void getHash(std::size_t index, void *hash) { }
 
     void beginProcessing() { }
     void beginProcessingWithDifficultyCheck(int difficultyBits) { }
+    void beginProcessingWithGeneratedPasswords(std::uint64_t startNonce,
+                                               int difficultyBits) { }
     void endProcessing() { }
     bool getDifficultyResult(std::size_t *index, void *hash) const { return false; }
 };

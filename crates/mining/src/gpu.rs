@@ -48,6 +48,7 @@ pub(crate) fn benchmark_best_gpu_runtime() -> Result<(BenchmarkResult, Benchmark
         best.workers,
         best.by_segment,
         best.precompute_refs,
+        best.generate_passwords_on_gpu,
         GPU_RUNTIME_BENCHMARK_DURATION,
     )?;
     Ok((best, runtime))
@@ -68,6 +69,7 @@ pub(crate) fn run_gpu_runtime_loop_benchmark(
                 batch_size,
                 by_segment,
                 precompute_refs,
+                true,
                 duration,
             ),
         BestGpuRuntimeDevice::Metal(descriptor, backend) => backend
@@ -273,6 +275,7 @@ impl BestGpuRuntimeDeviceWithBenchmark {
         batch_size: usize,
         by_segment: bool,
         precompute_refs: bool,
+        generate_passwords_on_gpu: bool,
         duration: Duration,
     ) -> Result<BenchmarkResult, MiningError> {
         match self {
@@ -282,6 +285,7 @@ impl BestGpuRuntimeDeviceWithBenchmark {
                 batch_size,
                 by_segment,
                 precompute_refs,
+                generate_passwords_on_gpu,
                 duration,
             ),
             Self::Metal(descriptor, _, backend) => backend.run_runtime_loop_benchmark_for_device(

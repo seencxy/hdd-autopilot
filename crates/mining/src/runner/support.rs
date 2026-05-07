@@ -11,7 +11,7 @@ use crate::backend::types::{GpuDeviceProfile, estimated_argon2_batch_memory_byte
 use crate::backend::{BackendDescriptor, BackendKind, BenchmarkResult, ComputeJob};
 use crate::{ChallengeResponse, MiningError};
 
-const PERSISTENT_BENCHMARK_CACHE_VERSION: u32 = 1;
+const PERSISTENT_BENCHMARK_CACHE_VERSION: u32 = 2;
 
 #[derive(Debug, Clone)]
 pub(super) struct SelectedBackend {
@@ -55,7 +55,14 @@ impl SelectedBackend {
                 self.profile.workers.max(1),
                 self.profile.concurrency.max(1)
             ),
-            BackendKind::Cuda | BackendKind::Metal | BackendKind::Opencl => format!(
+            BackendKind::Cuda => format!(
+                "批大小 {}，按分段 {}，预计算参考值 {}，GPU 生成输入 {}",
+                self.profile.workers.max(1),
+                localized_bool(self.profile.by_segment),
+                localized_bool(self.profile.precompute_refs),
+                localized_bool(self.profile.generate_passwords_on_gpu)
+            ),
+            BackendKind::Metal | BackendKind::Opencl => format!(
                 "批大小 {}，按分段 {}，预计算参考值 {}",
                 self.profile.workers.max(1),
                 localized_bool(self.profile.by_segment),
@@ -272,6 +279,8 @@ struct PersistentBenchmarkResult {
     concurrency: usize,
     by_segment: bool,
     precompute_refs: bool,
+    #[serde(default)]
+    generate_passwords_on_gpu: bool,
     attempts_per_s: f64,
 }
 
@@ -350,6 +359,7 @@ impl PersistentSelectedBackend {
                 concurrency: candidate.profile.concurrency,
                 by_segment: candidate.profile.by_segment,
                 precompute_refs: candidate.profile.precompute_refs,
+                generate_passwords_on_gpu: candidate.profile.generate_passwords_on_gpu,
                 attempts_per_s: candidate.profile.attempts_per_s,
             },
         }
@@ -370,6 +380,7 @@ impl PersistentSelectedBackend {
                 concurrency: self.profile.concurrency,
                 by_segment: self.profile.by_segment,
                 precompute_refs: self.profile.precompute_refs,
+                generate_passwords_on_gpu: self.profile.generate_passwords_on_gpu,
                 attempts: 0,
                 elapsed: Duration::ZERO,
                 attempts_per_s: self.profile.attempts_per_s,
@@ -539,6 +550,7 @@ mod tests {
                 concurrency: workers,
                 by_segment: false,
                 precompute_refs: false,
+                generate_passwords_on_gpu: false,
                 attempts: 0,
                 elapsed: Duration::from_secs(1),
                 attempts_per_s,

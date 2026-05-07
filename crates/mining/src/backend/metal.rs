@@ -189,6 +189,7 @@ impl MetalBackend {
                     batch_size: candidate.batch_size,
                     by_segment: candidate.by_segment,
                     precompute_refs: candidate.precompute_refs,
+                    generate_passwords_on_gpu: false,
                     duration: GPU_RUNTIME_BENCHMARK_DURATION,
                 },
                 &cancel,
@@ -221,6 +222,7 @@ impl MetalBackend {
                 batch_size,
                 by_segment,
                 precompute_refs,
+                generate_passwords_on_gpu: false,
                 duration,
             },
             &Arc::new(AtomicBool::new(false)),
@@ -238,6 +240,7 @@ impl MetalBackend {
             batch_size,
             by_segment,
             precompute_refs,
+            generate_passwords_on_gpu: _,
             duration,
         } = config;
         #[cfg(not(target_os = "macos"))]
@@ -289,6 +292,7 @@ impl MetalBackend {
                 concurrency: config.batch_size,
                 by_segment: config.by_segment,
                 precompute_refs: config.precompute_refs,
+                generate_passwords_on_gpu: false,
                 attempts,
                 elapsed,
                 attempts_per_s: attempts as f64 / elapsed.as_secs_f64().max(0.001),
@@ -309,6 +313,7 @@ impl MetalBackend {
             session_count: _,
             by_segment,
             precompute_refs,
+            generate_passwords_on_gpu: _,
             start_nonce,
             nonce_count: _,
         } = config;

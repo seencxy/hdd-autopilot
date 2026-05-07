@@ -89,6 +89,7 @@ struct SolverSessionState {
     std::vector<std::string> passwords;
     std::uint64_t prepared_start_nonce = 0;
     bool has_prepared_batch = false;
+    bool generated_passwords_on_gpu = false;
 
     SolverSessionState(const Job& job,
                        const SolverConfig& config,
@@ -100,10 +101,17 @@ struct SolverSessionState {
               device_index,
               config.batch_size)),
           passwords(config.batch_size) {
+        generated_passwords_on_gpu = config.generate_passwords_on_gpu;
         for (auto& password : passwords) {
             password.reserve(job.pass_prefix().size() + 20);
         }
-        prepare_batch(job, config, start_nonce);
+        if (generated_passwords_on_gpu) {
+            prepared->unit->setGeneratedPasswordPrefix(
+                job.pass_prefix().data(),
+                job.pass_prefix().size());
+        } else {
+            prepare_batch(job, config, start_nonce);
+        }
     }
 
     void prepare_batch(const Job& job,
@@ -170,6 +178,7 @@ SolverConfig Solver::default_config_for(const Job& job) const {
     config.batch_size = std::min<std::size_t>(estimate_max_batch_size(job), kDefaultRunBatchCap);
     config.by_segment = false;
     config.precompute_refs = false;
+    config.generate_passwords_on_gpu = true;
     return config;
 }
 
@@ -209,7 +218,8 @@ SolveResult Solver::mine_next_batch(const Job& job,
     }
 
     auto& state = *session.state;
-    if (!state.has_prepared_batch || state.prepared_start_nonce != session.next_nonce) {
+    if (!state.generated_passwords_on_gpu
+        && (!state.has_prepared_batch || state.prepared_start_nonce != session.next_nonce)) {
         state.prepare_batch(job, session.config, session.next_nonce);
     }
 
@@ -219,8 +229,14 @@ SolveResult Solver::mine_next_batch(const Job& job,
 
     const auto current_start_nonce = session.next_nonce;
     const auto next_start_nonce = current_start_nonce + session.config.batch_size;
-    state.prepared->unit->beginProcessingWithDifficultyCheck(job.difficulty_bits());
-    if (!stop.load(std::memory_order_relaxed)) {
+    if (state.generated_passwords_on_gpu) {
+        state.prepared->unit->beginProcessingWithGeneratedPasswords(
+            current_start_nonce,
+            job.difficulty_bits());
+    } else {
+        state.prepared->unit->beginProcessingWithDifficultyCheck(job.difficulty_bits());
+    }
+    if (!state.generated_passwords_on_gpu && !stop.load(std::memory_order_relaxed)) {
         // The ProcessingUnit API allows staging the next input batch after
         // beginProcessing(), while the CUDA stream works on the current batch.
         state.prepare_batch(job, session.config, next_start_nonce);
@@ -281,6 +297,7 @@ void Solver::validate_against_reference(const Job& job, std::uint64_t nonce) con
     config.batch_size = 1;
     config.by_segment = false;
     config.precompute_refs = false;
+    config.generate_passwords_on_gpu = false;
     const auto gpu_digest = compute_gpu_digest(job,
                                                config,
                                                device_index_,
@@ -368,18 +385,21 @@ std::vector<SolverConfig> Solver::build_benchmark_candidates(std::size_t max_bat
         default_config.batch_size = batch_size;
         default_config.by_segment = false;
         default_config.precompute_refs = false;
+        default_config.generate_passwords_on_gpu = true;
         candidates.push_back(default_config);
 
         SolverConfig segmented_config;
         segmented_config.batch_size = batch_size;
         segmented_config.by_segment = true;
         segmented_config.precompute_refs = false;
+        segmented_config.generate_passwords_on_gpu = true;
         candidates.push_back(segmented_config);
 
         SolverConfig precomputed_config;
         precomputed_config.batch_size = batch_size;
         precomputed_config.by_segment = true;
         precomputed_config.precompute_refs = true;
+        precomputed_config.generate_passwords_on_gpu = true;
         candidates.push_back(precomputed_config);
     }
     if (candidates.empty()) {
@@ -387,6 +407,7 @@ std::vector<SolverConfig> Solver::build_benchmark_candidates(std::size_t max_bat
         fallback_config.batch_size = 1;
         fallback_config.by_segment = false;
         fallback_config.precompute_refs = false;
+        fallback_config.generate_passwords_on_gpu = true;
         candidates.push_back(fallback_config);
     }
     return candidates;

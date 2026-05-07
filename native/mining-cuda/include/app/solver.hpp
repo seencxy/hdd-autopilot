@@ -18,6 +18,7 @@ struct SolverConfig {
     std::size_t batch_size = 1;
     bool by_segment = false;
     bool precompute_refs = false;
+    bool generate_passwords_on_gpu = true;
 };
 
 struct SolveResult {

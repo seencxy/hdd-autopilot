@@ -32,6 +32,17 @@ private:
     void *refs;
     DifficultyCheckResult *difficultyResultDevice;
     std::unique_ptr<DifficultyCheckResult> difficultyResultHost;
+    void *generatedPasswordPrefix;
+    void *generatedSalt;
+    void *generatedSecret;
+    void *generatedAssocData;
+    std::size_t generatedPasswordPrefixSize;
+    std::uint32_t generatedOutputLength;
+    std::uint32_t generatedMemoryCost;
+    std::uint32_t generatedSaltLength;
+    std::uint32_t generatedSecretLength;
+    std::uint32_t generatedAssocDataLength;
+    bool generatedPasswordContextReady;
 
     std::unique_ptr<std::uint8_t[]> blocksIn;
     std::unique_ptr<std::uint8_t[]> blocksOut;
@@ -47,6 +58,7 @@ private:
     void runKernelOneshot(std::uint32_t lanesPerBlock,
                           std::size_t jobsPerBlock);
     void runDifficultyCheckKernel(int difficultyBits);
+    void runGeneratedInputKernel(std::uint64_t startNonce);
 
 public:
     std::uint32_t getMinLanesPerBlock() const { return bySegment ? 1 : lanes; }
@@ -66,10 +78,21 @@ public:
     void *getInputMemory(std::size_t jobId) const;
     const void *getOutputMemory(std::size_t jobId) const;
 
+    void setGeneratedPasswordContext(
+            const void *passwordPrefix, std::size_t passwordPrefixSize,
+            std::uint32_t outputLength,
+            const void *salt, std::uint32_t saltLength,
+            const void *secret, std::uint32_t secretLength,
+            const void *assocData, std::uint32_t assocDataLength,
+            std::uint32_t memoryCost);
     void run(std::uint32_t lanesPerBlock, std::size_t jobsPerBlock);
     void runWithDifficultyCheck(std::uint32_t lanesPerBlock,
                                 std::size_t jobsPerBlock,
                                 int difficultyBits);
+    void runGeneratedWithDifficultyCheck(std::uint32_t lanesPerBlock,
+                                         std::size_t jobsPerBlock,
+                                         std::uint64_t startNonce,
+                                         int difficultyBits);
     float finish();
     bool getDifficultyResult(std::size_t *jobId, void *hash) const;
 };

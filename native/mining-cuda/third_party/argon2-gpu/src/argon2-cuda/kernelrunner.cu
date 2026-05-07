@@ -21,6 +21,8 @@
 #define ARGON2_BLOCK_SIZE 1024
 #define ARGON2_QWORDS_IN_BLOCK (ARGON2_BLOCK_SIZE / 8)
 #define ARGON2_SYNC_POINTS 4
+#define ARGON2_PREHASH_DIGEST_LENGTH 64
+#define ARGON2_PREHASH_SEED_LENGTH 72
 
 #define THREADS_PER_LANE 32
 #define QWORDS_PER_THREAD (ARGON2_QWORDS_IN_BLOCK / 32)
@@ -529,6 +531,162 @@ __device__ void blake2b_final_device(
     for (uint32_t i = 0; i < output_len; ++i) {
         output[i] = buffer[i];
     }
+}
+
+__device__ uint32_t uint64_to_ascii_device(uint64_t value, uint8_t *output)
+{
+    if (value == 0) {
+        output[0] = '0';
+        return 1;
+    }
+
+    uint8_t digits[20];
+    uint32_t index = sizeof(digits);
+    while (value > 0) {
+        digits[--index] = static_cast<uint8_t>('0' + value % 10);
+        value /= 10;
+    }
+
+    const uint32_t length = sizeof(digits) - index;
+    for (uint32_t i = 0; i < length; ++i) {
+        output[i] = digits[index + i];
+    }
+    return length;
+}
+
+__device__ void blake2b_digest_long_device(
+        uint8_t *output, uint32_t output_len,
+        const uint8_t *input, uint32_t input_len)
+{
+    uint8_t out_len_bytes[4];
+    uint8_t out_buffer[64];
+    Blake2bDeviceState blake;
+
+    blake2b_store32_device(out_len_bytes, output_len);
+    if (output_len <= sizeof(out_buffer)) {
+        blake2b_init_device(&blake, output_len);
+        blake2b_update_device(&blake, out_len_bytes, sizeof(out_len_bytes));
+        blake2b_update_device(&blake, input, input_len);
+        blake2b_final_device(&blake, output, output_len);
+        return;
+    }
+
+    blake2b_init_device(&blake, sizeof(out_buffer));
+    blake2b_update_device(&blake, out_len_bytes, sizeof(out_len_bytes));
+    blake2b_update_device(&blake, input, input_len);
+    blake2b_final_device(&blake, out_buffer, sizeof(out_buffer));
+
+    for (uint32_t i = 0; i < sizeof(out_buffer) / 2; ++i) {
+        output[i] = out_buffer[i];
+    }
+    output += sizeof(out_buffer) / 2;
+
+    uint32_t to_produce = output_len - sizeof(out_buffer) / 2;
+    while (to_produce > sizeof(out_buffer)) {
+        blake2b_init_device(&blake, sizeof(out_buffer));
+        blake2b_update_device(&blake, out_buffer, sizeof(out_buffer));
+        blake2b_final_device(&blake, out_buffer, sizeof(out_buffer));
+
+        for (uint32_t i = 0; i < sizeof(out_buffer) / 2; ++i) {
+            output[i] = out_buffer[i];
+        }
+        output += sizeof(out_buffer) / 2;
+        to_produce -= sizeof(out_buffer) / 2;
+    }
+
+    blake2b_init_device(&blake, to_produce);
+    blake2b_update_device(&blake, out_buffer, sizeof(out_buffer));
+    blake2b_final_device(&blake, output, to_produce);
+}
+
+__device__ void argon2_initial_hash_generated_device(
+        uint8_t *output, const uint8_t *password_prefix,
+        size_t password_prefix_len, uint64_t nonce, uint32_t output_len,
+        const uint8_t *salt, uint32_t salt_len,
+        const uint8_t *secret, uint32_t secret_len,
+        const uint8_t *assoc_data, uint32_t assoc_data_len,
+        uint32_t passes, uint32_t memory_cost, uint32_t lanes,
+        uint32_t type, uint32_t version)
+{
+    uint8_t value[4];
+    uint8_t nonce_digits[20];
+    const uint32_t nonce_digits_len =
+            uint64_to_ascii_device(nonce, nonce_digits);
+    const uint32_t password_len =
+            static_cast<uint32_t>(password_prefix_len) + nonce_digits_len;
+    Blake2bDeviceState blake;
+
+    blake2b_init_device(&blake, ARGON2_PREHASH_DIGEST_LENGTH);
+
+    blake2b_store32_device(value, lanes);
+    blake2b_update_device(&blake, value, sizeof(value));
+    blake2b_store32_device(value, output_len);
+    blake2b_update_device(&blake, value, sizeof(value));
+    blake2b_store32_device(value, memory_cost);
+    blake2b_update_device(&blake, value, sizeof(value));
+    blake2b_store32_device(value, passes);
+    blake2b_update_device(&blake, value, sizeof(value));
+    blake2b_store32_device(value, version);
+    blake2b_update_device(&blake, value, sizeof(value));
+    blake2b_store32_device(value, type);
+    blake2b_update_device(&blake, value, sizeof(value));
+    blake2b_store32_device(value, password_len);
+    blake2b_update_device(&blake, value, sizeof(value));
+    blake2b_update_device(&blake, password_prefix, password_prefix_len);
+    blake2b_update_device(&blake, nonce_digits, nonce_digits_len);
+    blake2b_store32_device(value, salt_len);
+    blake2b_update_device(&blake, value, sizeof(value));
+    blake2b_update_device(&blake, salt, salt_len);
+    blake2b_store32_device(value, secret_len);
+    blake2b_update_device(&blake, value, sizeof(value));
+    blake2b_update_device(&blake, secret, secret_len);
+    blake2b_store32_device(value, assoc_data_len);
+    blake2b_update_device(&blake, value, sizeof(value));
+    blake2b_update_device(&blake, assoc_data, assoc_data_len);
+
+    blake2b_final_device(&blake, output, ARGON2_PREHASH_DIGEST_LENGTH);
+}
+
+__global__ void argon2_generate_initial_blocks_kernel(
+        void *memory, size_t job_size, uint32_t lanes, uint32_t lane_blocks,
+        size_t batch_size, uint64_t start_nonce,
+        const uint8_t *password_prefix, size_t password_prefix_len,
+        uint32_t output_len, const uint8_t *salt, uint32_t salt_len,
+        const uint8_t *secret, uint32_t secret_len,
+        const uint8_t *assoc_data, uint32_t assoc_data_len,
+        uint32_t passes, uint32_t memory_cost, uint32_t type,
+        uint32_t version)
+{
+    const size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t items_per_job = static_cast<size_t>(lanes) * 2;
+    const size_t total_items = batch_size * items_per_job;
+    if (index >= total_items) {
+        return;
+    }
+
+    const uint32_t job_id = static_cast<uint32_t>(index / items_per_job);
+    const uint32_t lane_block = static_cast<uint32_t>(index % items_per_job);
+    const uint32_t block_index = lane_block / lanes;
+    const uint32_t lane = lane_block % lanes;
+    const uint64_t nonce = start_nonce + job_id;
+
+    uint8_t initial_hash[ARGON2_PREHASH_SEED_LENGTH];
+    argon2_initial_hash_generated_device(
+        initial_hash, password_prefix, password_prefix_len, nonce, output_len,
+        salt, salt_len, secret, secret_len, assoc_data, assoc_data_len,
+        passes, memory_cost, lanes, type, version);
+    blake2b_store32_device(
+        initial_hash + ARGON2_PREHASH_DIGEST_LENGTH, block_index);
+    blake2b_store32_device(
+        initial_hash + ARGON2_PREHASH_DIGEST_LENGTH + 4, lane);
+
+    auto memory_blocks = static_cast<block_g *>(memory);
+    auto output_block = reinterpret_cast<uint8_t *>(
+        memory_blocks + static_cast<size_t>(job_id) * lanes * lane_blocks
+        + static_cast<size_t>(block_index) * lanes + lane);
+    blake2b_digest_long_device(output_block, ARGON2_BLOCK_SIZE,
+                               initial_hash,
+                               ARGON2_PREHASH_SEED_LENGTH);
 }
 
 __device__ bool digest_meets_difficulty_device(
@@ -1084,6 +1242,11 @@ KernelRunner::KernelRunner(uint32_t type, uint32_t version, uint32_t passes,
       precompute(precompute), stream(), memory(), refs(),
       difficultyResultDevice(),
       difficultyResultHost(new DifficultyCheckResult{}),
+      generatedPasswordPrefix(), generatedSalt(), generatedSecret(),
+      generatedAssocData(), generatedPasswordPrefixSize(),
+      generatedOutputLength(), generatedMemoryCost(), generatedSaltLength(),
+      generatedSecretLength(), generatedAssocDataLength(),
+      generatedPasswordContextReady(false),
       start(), end(), kernelStart(), kernelEnd(),
       blocksIn(new uint8_t[batchSize * lanes * 2 * ARGON2_BLOCK_SIZE]),
       blocksOut(new uint8_t[batchSize * lanes * ARGON2_BLOCK_SIZE])
@@ -1174,6 +1337,18 @@ KernelRunner::~KernelRunner()
     if (difficultyResultDevice != nullptr) {
         cudaFree(difficultyResultDevice);
     }
+    if (generatedPasswordPrefix != nullptr) {
+        cudaFree(generatedPasswordPrefix);
+    }
+    if (generatedSalt != nullptr) {
+        cudaFree(generatedSalt);
+    }
+    if (generatedSecret != nullptr) {
+        cudaFree(generatedSecret);
+    }
+    if (generatedAssocData != nullptr) {
+        cudaFree(generatedAssocData);
+    }
 }
 
 void *KernelRunner::getInputMemory(size_t jobId) const
@@ -1185,6 +1360,46 @@ const void *KernelRunner::getOutputMemory(size_t jobId) const
 {
     size_t copySize = lanes * ARGON2_BLOCK_SIZE;
     return blocksOut.get() + jobId * copySize;
+}
+
+static void replaceDeviceBuffer(void **target, const void *source, size_t size)
+{
+    if (*target != nullptr) {
+        CudaException::check(cudaFree(*target));
+        *target = nullptr;
+    }
+    if (size == 0) {
+        return;
+    }
+    if (source == nullptr) {
+        throw std::logic_error("Generated password context source is null");
+    }
+    CudaException::check(cudaMalloc(target, size));
+    CudaException::check(cudaMemcpy(*target, source, size,
+                                    cudaMemcpyHostToDevice));
+}
+
+void KernelRunner::setGeneratedPasswordContext(
+        const void *passwordPrefix, size_t passwordPrefixSize,
+        uint32_t outputLength, const void *salt, uint32_t saltLength,
+        const void *secret, uint32_t secretLength,
+        const void *assocData, uint32_t assocDataLength,
+        uint32_t memoryCost)
+{
+    replaceDeviceBuffer(&generatedPasswordPrefix,
+                        passwordPrefix,
+                        passwordPrefixSize);
+    replaceDeviceBuffer(&generatedSalt, salt, saltLength);
+    replaceDeviceBuffer(&generatedSecret, secret, secretLength);
+    replaceDeviceBuffer(&generatedAssocData, assocData, assocDataLength);
+
+    generatedPasswordPrefixSize = passwordPrefixSize;
+    generatedOutputLength = outputLength;
+    generatedMemoryCost = memoryCost;
+    generatedSaltLength = saltLength;
+    generatedSecretLength = secretLength;
+    generatedAssocDataLength = assocDataLength;
+    generatedPasswordContextReady = true;
 }
 
 void KernelRunner::copyInputBlocks()
@@ -1224,6 +1439,29 @@ void KernelRunner::runDifficultyCheckKernel(int difficultyBits)
     argon2_finalize_difficulty_kernel<<<blocks, threads, 0, stream>>>(
         memory, jobSize, lanes, batchSize, difficultyBits,
         difficultyResultDevice);
+}
+
+void KernelRunner::runGeneratedInputKernel(uint64_t startNonce)
+{
+    if (!generatedPasswordContextReady) {
+        throw std::logic_error("Generated password context is not configured");
+    }
+
+    const size_t jobSize = static_cast<size_t>(lanes) * segmentBlocks
+            * ARGON2_SYNC_POINTS * ARGON2_BLOCK_SIZE;
+    const uint32_t laneBlocks = segmentBlocks * ARGON2_SYNC_POINTS;
+    const size_t itemCount = batchSize * static_cast<size_t>(lanes) * 2;
+    dim3 threads = dim3(128);
+    dim3 blocks = dim3((itemCount + threads.x - 1) / threads.x);
+
+    argon2_generate_initial_blocks_kernel<<<blocks, threads, 0, stream>>>(
+        memory, jobSize, lanes, laneBlocks, batchSize, startNonce,
+        static_cast<const uint8_t *>(generatedPasswordPrefix),
+        generatedPasswordPrefixSize, generatedOutputLength,
+        static_cast<const uint8_t *>(generatedSalt), generatedSaltLength,
+        static_cast<const uint8_t *>(generatedSecret), generatedSecretLength,
+        static_cast<const uint8_t *>(generatedAssocData),
+        generatedAssocDataLength, passes, generatedMemoryCost, type, version);
 }
 
 void KernelRunner::runKernelSegment(uint32_t lanesPerBlock,
@@ -1426,6 +1664,44 @@ void KernelRunner::runWithDifficultyCheck(
     copyInputBlocks();
 
     CudaException::check(cudaEventRecord(kernelStart, stream));
+
+    if (bySegment) {
+        for (uint32_t pass = 0; pass < passes; pass++) {
+            for (uint32_t slice = 0; slice < ARGON2_SYNC_POINTS; slice++) {
+                runKernelSegment(lanesPerBlock, jobsPerBlock, pass, slice);
+            }
+        }
+    } else {
+        runKernelOneshot(lanesPerBlock, jobsPerBlock);
+    }
+
+    runDifficultyCheckKernel(difficultyBits);
+
+    CudaException::check(cudaGetLastError());
+
+    CudaException::check(cudaEventRecord(kernelEnd, stream));
+
+    CudaException::check(cudaMemcpyAsync(
+                             difficultyResultHost.get(), difficultyResultDevice,
+                             sizeof(DifficultyCheckResult),
+                             cudaMemcpyDeviceToHost, stream));
+
+    CudaException::check(cudaEventRecord(end, stream));
+}
+
+void KernelRunner::runGeneratedWithDifficultyCheck(
+        uint32_t lanesPerBlock, size_t jobsPerBlock, uint64_t startNonce,
+        int difficultyBits)
+{
+    CudaException::check(cudaEventRecord(start, stream));
+
+    CudaException::check(cudaMemsetAsync(difficultyResultDevice, 0,
+                                         sizeof(DifficultyCheckResult),
+                                         stream));
+
+    CudaException::check(cudaEventRecord(kernelStart, stream));
+
+    runGeneratedInputKernel(startNonce);
 
     if (bySegment) {
         for (uint32_t pass = 0; pass < passes; pass++) {

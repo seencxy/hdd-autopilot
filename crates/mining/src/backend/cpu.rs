@@ -356,6 +356,7 @@ impl CpuBackend {
             concurrency: concurrency_total,
             by_segment: false,
             precompute_refs: false,
+            generate_passwords_on_gpu: false,
             attempts,
             elapsed,
             attempts_per_s: attempts as f64 / elapsed.as_secs_f64().max(0.001),

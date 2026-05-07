@@ -29,6 +29,7 @@ pub struct BenchmarkResult {
     pub concurrency: usize,
     pub by_segment: bool,
     pub precompute_refs: bool,
+    pub generate_passwords_on_gpu: bool,
     pub attempts: i64,
     pub elapsed: Duration,
     pub attempts_per_s: f64,
@@ -48,6 +49,7 @@ pub struct GpuBenchmarkConfig {
     pub batch_size: usize,
     pub by_segment: bool,
     pub precompute_refs: bool,
+    pub generate_passwords_on_gpu: bool,
     pub duration: Duration,
 }
 
@@ -58,6 +60,7 @@ pub struct GpuMiningSessionConfig {
     pub session_count: usize,
     pub by_segment: bool,
     pub precompute_refs: bool,
+    pub generate_passwords_on_gpu: bool,
     pub start_nonce: u64,
     pub nonce_count: u64,
 }

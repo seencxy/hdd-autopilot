@@ -130,6 +130,20 @@ void ProcessingUnit::setPassword(std::size_t index, const void *pw,
                             programContext->getArgon2Version());
 }
 
+void ProcessingUnit::setGeneratedPasswordPrefix(const void *prefix,
+                                                std::size_t prefixSize)
+{
+    runner.setGeneratedPasswordContext(prefix, prefixSize,
+                                       params->getOutputLength(),
+                                       params->getSalt(),
+                                       params->getSaltLength(),
+                                       params->getSecret(),
+                                       params->getSecretLength(),
+                                       params->getAssocData(),
+                                       params->getAssocDataLength(),
+                                       params->getMemoryCost());
+}
+
 void ProcessingUnit::getHash(std::size_t index, void *hash)
 {
     params->finalize(hash, runner.getOutputMemory(index));
@@ -146,6 +160,16 @@ void ProcessingUnit::beginProcessingWithDifficultyCheck(int difficultyBits)
     setCudaDevice(device->getDeviceIndex());
     runner.runWithDifficultyCheck(bestLanesPerBlock, bestJobsPerBlock,
                                   difficultyBits);
+}
+
+void ProcessingUnit::beginProcessingWithGeneratedPasswords(
+        std::uint64_t startNonce, int difficultyBits)
+{
+    setCudaDevice(device->getDeviceIndex());
+    runner.runGeneratedWithDifficultyCheck(bestLanesPerBlock,
+                                           bestJobsPerBlock,
+                                           startNonce,
+                                           difficultyBits);
 }
 
 void ProcessingUnit::endProcessing()

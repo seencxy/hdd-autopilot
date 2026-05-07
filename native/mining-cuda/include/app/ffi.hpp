@@ -13,6 +13,7 @@ struct mining_cuda_solver_config {
     std::size_t batch_size;
     bool by_segment;
     bool precompute_refs;
+    bool generate_passwords_on_gpu;
 };
 
 struct mining_cuda_job {
@@ -32,6 +33,7 @@ struct mining_cuda_benchmark_result {
     std::size_t batch_size;
     bool by_segment;
     bool precompute_refs;
+    bool generate_passwords_on_gpu;
     std::int64_t attempts;
     std::int64_t elapsed_ms;
     double attempts_per_second;
