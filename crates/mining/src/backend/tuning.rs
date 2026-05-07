@@ -18,6 +18,9 @@ pub struct GpuTuningShape {
     pub precompute_refs: bool,
 }
 
+const DISCRETE_GPU_MEMORY_TARGET_PERCENT: u128 = 90;
+const DISCRETE_GPU_MAX_ALLOC_TARGET_PERCENT: u128 = 95;
+
 pub fn recommended_gpu_tuning_shapes(
     profile: Option<GpuDeviceProfile>,
     memory_cost_kib: u32,
@@ -93,12 +96,12 @@ fn recommended_max_batch(
     } else if profile.unified_memory {
         45
     } else {
-        65
+        DISCRETE_GPU_MEMORY_TARGET_PERCENT
     };
     let alloc_percent = if profile.low_power || profile.unified_memory {
         75
     } else {
-        90
+        DISCRETE_GPU_MAX_ALLOC_TARGET_PERCENT
     };
     let high_memory_device = profile.global_memory_bytes >= 12 * 1024 * 1024 * 1024
         || profile.max_alloc_bytes >= 8 * 1024 * 1024 * 1024;
@@ -288,6 +291,32 @@ mod tests {
             estimated_argon2_batch_memory_bytes(64 * 1024, 16),
             1024 * 1024 * 1024
         );
+    }
+
+    #[test]
+    fn recommended_gpu_tuning_shapes_keeps_large_discrete_gpu_above_sm_count() {
+        let shapes = recommended_gpu_tuning_shapes(
+            Some(GpuDeviceProfile {
+                global_memory_bytes: 24 * 1024 * 1024 * 1024,
+                max_alloc_bytes: 24 * 1024 * 1024 * 1024,
+                compute_units: 82,
+                max_threads_per_group: 1024,
+                local_memory_bytes: 64 * 1024,
+                subgroup_size: 32,
+                unified_memory: false,
+                low_power: false,
+                removable: false,
+            }),
+            256 * 1024,
+            1,
+        );
+        let max_batch = shapes
+            .iter()
+            .map(|shape| shape.batch_size)
+            .max()
+            .expect("recommended shapes");
+
+        assert!(max_batch >= 82);
     }
 
     #[test]

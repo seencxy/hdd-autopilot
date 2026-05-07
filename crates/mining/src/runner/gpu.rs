@@ -1,13 +1,13 @@
 use crate::backend::cuda::{GPU_FINALIST_COUNT, GPU_RUNTIME_BENCHMARK_DURATION};
-use crate::backend::types::GpuBenchmarkConfig;
+use crate::backend::types::{GpuBenchmarkConfig, estimated_argon2_batch_memory_bytes};
 use crate::backend::{BackendDescriptor, BenchmarkResult, ComputeJob};
 use crate::error::is_interrupted_error;
 use crate::{MiningError, humanize_error};
 
 use super::Runner;
-use super::support::{BenchmarkKey, SelectedBackend, localized_bool};
+use super::support::{BenchmarkKey, SelectedBackend, format_memory_bytes, localized_bool};
 
-const GPU_LARGE_BATCH_SPEED_FLOOR_RATIO: f64 = 0.97;
+const GPU_LARGE_BATCH_SPEED_FLOOR_RATIO: f64 = 0.90;
 
 impl Runner {
     pub(super) fn collect_gpu_backend_candidates(
@@ -38,6 +38,7 @@ impl Runner {
         self.collect_gpu_candidates_by_device(
             "CUDA",
             self.cuda_backend.list_devices()?,
+            job,
             BenchmarkKey::from(job),
             |descriptor| {
                 self.cuda_backend
@@ -65,6 +66,7 @@ impl Runner {
         self.collect_gpu_candidates_by_device(
             "OpenCL",
             self.opencl_backend.list_devices()?,
+            job,
             BenchmarkKey::from(job),
             |descriptor| {
                 self.opencl_backend
@@ -92,6 +94,7 @@ impl Runner {
         self.collect_gpu_candidates_by_device(
             "Metal",
             self.metal_backend.list_devices()?,
+            job,
             BenchmarkKey::from(job),
             |descriptor| {
                 self.metal_backend
@@ -105,6 +108,7 @@ impl Runner {
         &self,
         label: &str,
         devices: Vec<BackendDescriptor>,
+        job: &ComputeJob,
         params_key: BenchmarkKey,
         screen: FScreen,
         tune: FTune,
@@ -127,12 +131,13 @@ impl Runner {
             match screen(&descriptor) {
                 Ok(result) => {
                     self.log(format_args!(
-                        "{} 设备初筛完成：设备 {}，默认批大小 {}，按分段 {}，预计算参考值 {}，预计速度约 {:.2} 次/秒。",
+                        "{} 设备初筛完成：设备 {}，默认批大小 {}，按分段 {}，预计算参考值 {}，预计显存 {}，预计速度约 {:.2} 次/秒。",
                         label,
                         descriptor.name,
                         result.workers,
                         localized_bool(result.by_segment),
                         localized_bool(result.precompute_refs),
+                        estimated_gpu_memory_label(job, result.concurrency),
                         result.attempts_per_s
                     ));
                     screened.push((descriptor, result));
@@ -162,12 +167,13 @@ impl Runner {
             match tune(&descriptor) {
                 Ok(result) => {
                     self.log(format_args!(
-                        "{} 自动调优完成：设备 {}，推荐批大小 {}，按分段 {}，预计算参考值 {}，预计速度约 {:.2} 次/秒。",
+                        "{} 自动调优完成：设备 {}，推荐批大小 {}，按分段 {}，预计算参考值 {}，预计显存 {}，预计速度约 {:.2} 次/秒。",
                         label,
                         descriptor.name,
                         result.workers,
                         localized_bool(result.by_segment),
                         localized_bool(result.precompute_refs),
+                        estimated_gpu_memory_label(job, result.concurrency),
                         result.attempts_per_s
                     ));
                     candidates.push(SelectedBackend::new(
@@ -200,7 +206,7 @@ impl Runner {
         let templates = self
             .cuda_backend
             .solver_templates_for_descriptor(descriptor, job);
-        self.tune_gpu_backend("CUDA", descriptor, &templates, |candidate| {
+        self.tune_gpu_backend("CUDA", descriptor, job, &templates, |candidate| {
             self.cuda_backend.run_runtime_loop_benchmark_with_cancel(
                 job,
                 GpuBenchmarkConfig {
@@ -223,7 +229,7 @@ impl Runner {
         let templates = self
             .opencl_backend
             .solver_templates_for_descriptor(descriptor, job);
-        self.tune_gpu_backend("OpenCL", descriptor, &templates, |candidate| {
+        self.tune_gpu_backend("OpenCL", descriptor, job, &templates, |candidate| {
             self.opencl_backend.run_runtime_loop_benchmark_with_cancel(
                 job,
                 GpuBenchmarkConfig {
@@ -246,7 +252,7 @@ impl Runner {
         let templates = self
             .metal_backend
             .solver_templates_for_descriptor(descriptor, job);
-        self.tune_gpu_backend("Metal", descriptor, &templates, |candidate| {
+        self.tune_gpu_backend("Metal", descriptor, job, &templates, |candidate| {
             self.metal_backend.run_runtime_loop_benchmark_with_cancel(
                 job,
                 GpuBenchmarkConfig {
@@ -265,6 +271,7 @@ impl Runner {
         &self,
         label: &str,
         descriptor: &BackendDescriptor,
+        job: &ComputeJob,
         templates: &[TConfig],
         run: FRun,
     ) -> Result<BenchmarkResult, MiningError>
@@ -291,7 +298,7 @@ impl Runner {
                 }
             };
             self.log(format_args!(
-                "{} 自动调优结果 {}/{}：设备 {}，批大小 {}，按分段 {}，预计算参考值 {}，速度约 {:.2} 次/秒。",
+                "{} 自动调优结果 {}/{}：设备 {}，批大小 {}，按分段 {}，预计算参考值 {}，预计显存 {}，速度约 {:.2} 次/秒。",
                 label,
                 index + 1,
                 total_cases,
@@ -299,6 +306,7 @@ impl Runner {
                 result.workers,
                 localized_bool(result.by_segment),
                 localized_bool(result.precompute_refs),
+                estimated_gpu_memory_label(job, result.concurrency),
                 result.attempts_per_s
             ));
             results.push(result);
@@ -357,6 +365,13 @@ impl Runner {
     }
 }
 
+fn estimated_gpu_memory_label(job: &ComputeJob, batch_size: usize) -> String {
+    format_memory_bytes(estimated_argon2_batch_memory_bytes(
+        job.memory_cost_kib,
+        batch_size,
+    ))
+}
+
 fn fastest_gpu_tuning_result(results: &[BenchmarkResult]) -> Option<BenchmarkResult> {
     results.iter().copied().max_by(|left, right| {
         left.attempts_per_s
@@ -408,12 +423,12 @@ mod tests {
             select_gpu_tuning_result(&[result(16, 100.0), result(128, 98.0), result(256, 95.0)])
                 .expect("selected tuning result");
 
-        assert_eq!(selected.concurrency, 128);
+        assert_eq!(selected.concurrency, 256);
     }
 
     #[test]
     fn select_gpu_tuning_result_keeps_fastest_when_larger_batch_is_too_slow() {
-        let selected = select_gpu_tuning_result(&[result(16, 100.0), result(128, 90.0)])
+        let selected = select_gpu_tuning_result(&[result(16, 100.0), result(128, 89.0)])
             .expect("selected tuning result");
 
         assert_eq!(selected.concurrency, 16);
