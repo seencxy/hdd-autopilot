@@ -12,7 +12,7 @@ use crate::backend::types::{
 };
 use crate::error::{MiningError, interrupted_error};
 
-pub(crate) const CPU_BENCHMARK_CASE_DURATION: Duration = Duration::from_secs(2);
+pub(crate) const CPU_BENCHMARK_CASE_DURATION: Duration = Duration::from_millis(750);
 const CPU_ATTEMPT_FLUSH_INTERVAL: i64 = 256;
 
 struct CpuDigestEngine {

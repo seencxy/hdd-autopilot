@@ -201,23 +201,17 @@ pub(super) struct RoundStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct BenchmarkKey {
-    pub(super) seed_bytes: Vec<u8>,
-    pub(super) pass_prefix: Vec<u8>,
     pub(super) memory_cost_kib: u32,
     pub(super) time_cost: u32,
     pub(super) parallelism: u32,
-    pub(super) difficulty_bits: i32,
 }
 
 impl From<&ComputeJob> for BenchmarkKey {
     fn from(job: &ComputeJob) -> Self {
         Self {
-            seed_bytes: job.seed_bytes.clone(),
-            pass_prefix: job.pass_prefix.clone(),
             memory_cost_kib: job.memory_cost_kib,
             time_cost: job.time_cost,
             parallelism: job.parallelism,
-            difficulty_bits: job.difficulty_bits,
         }
     }
 }
@@ -349,12 +343,9 @@ mod tests {
 
     fn params_key() -> BenchmarkKey {
         BenchmarkKey {
-            seed_bytes: b"seed-a".to_vec(),
-            pass_prefix: b"seed-a:1:visitor:1:salt:".to_vec(),
             memory_cost_kib: 64 * 1024,
             time_cost: 1,
             parallelism: 1,
-            difficulty_bits: 12,
         }
     }
 
@@ -491,32 +482,10 @@ mod tests {
     }
 
     #[test]
-    fn benchmark_key_uses_difficulty_bits() {
+    fn benchmark_key_reuses_tuning_for_seed_pass_prefix_and_difficulty_changes() {
         let left = ComputeJob {
             seed_bytes: b"seed-a".to_vec(),
             pass_prefix: b"prefix-a:".to_vec(),
-            time_cost: 1,
-            memory_cost_kib: 64 * 1024,
-            parallelism: 1,
-            difficulty_bits: 12,
-        };
-        let right = ComputeJob {
-            seed_bytes: b"seed-a".to_vec(),
-            pass_prefix: b"prefix-a:".to_vec(),
-            time_cost: 1,
-            memory_cost_kib: 64 * 1024,
-            parallelism: 1,
-            difficulty_bits: 24,
-        };
-
-        assert_ne!(BenchmarkKey::from(&left), BenchmarkKey::from(&right));
-    }
-
-    #[test]
-    fn benchmark_key_uses_http_seed_and_pass_prefix() {
-        let left = ComputeJob {
-            seed_bytes: b"seed-a".to_vec(),
-            pass_prefix: b"seed-a:1:visitor:1:salt:".to_vec(),
             time_cost: 1,
             memory_cost_kib: 64 * 1024,
             parallelism: 1,
@@ -528,10 +497,10 @@ mod tests {
             time_cost: 1,
             memory_cost_kib: 64 * 1024,
             parallelism: 1,
-            difficulty_bits: 12,
+            difficulty_bits: 24,
         };
 
-        assert_ne!(BenchmarkKey::from(&left), BenchmarkKey::from(&right));
+        assert_eq!(BenchmarkKey::from(&left), BenchmarkKey::from(&right));
     }
 
     #[test]

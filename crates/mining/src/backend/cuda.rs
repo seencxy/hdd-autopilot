@@ -8,9 +8,7 @@ use mining_cuda_sys::{CudaDeviceInfo, CudaSolverConfig};
 
 use mining_cuda_sys as cuda_sys;
 
-use crate::backend::cpu::{
-    CPU_BENCHMARK_CASE_DURATION, ComputeJob, benchmark_job_for_tuning, compute_digest, hex_lower,
-};
+use crate::backend::cpu::{ComputeJob, benchmark_job_for_tuning, compute_digest, hex_lower};
 use crate::backend::types::{
     BackendDescriptor, BackendKind, BenchmarkResult, GPUAvailability, GpuBenchmarkConfig,
     GpuDeviceProfile, GpuMiningSessionConfig, MineBlockResult, MineResult,
@@ -18,8 +16,8 @@ use crate::backend::types::{
 };
 use crate::error::{MiningError, interrupted_error};
 
-pub(crate) const GPU_RUNTIME_BENCHMARK_DURATION: Duration = CPU_BENCHMARK_CASE_DURATION;
-pub(crate) const GPU_DEVICE_SCREENING_DURATION: Duration = Duration::from_millis(750);
+pub(crate) const GPU_RUNTIME_BENCHMARK_DURATION: Duration = Duration::from_millis(750);
+pub(crate) const GPU_DEVICE_SCREENING_DURATION: Duration = Duration::from_millis(250);
 pub(crate) const GPU_FINALIST_COUNT: usize = 4;
 
 #[derive(Debug, Clone, Default)]

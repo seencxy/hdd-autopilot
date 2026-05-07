@@ -8,6 +8,8 @@ use super::Runner;
 use super::support::{BenchmarkKey, SelectedBackend, format_memory_bytes, localized_bool};
 
 const GPU_LARGE_BATCH_SPEED_FLOOR_RATIO: f64 = 0.90;
+const GPU_TUNING_MIN_CASES: usize = 12;
+const GPU_TUNING_STALE_CASES: usize = 9;
 
 impl Runner {
     pub(super) fn collect_gpu_backend_candidates(
@@ -299,6 +301,8 @@ impl Runner {
     {
         let total_cases = templates.len();
         let mut results = Vec::new();
+        let mut best_attempts_per_s = 0.0f64;
+        let mut best_result_at = 0usize;
         for (index, candidate) in templates.iter().copied().enumerate() {
             self.check_cancel()?;
             let result = match run(candidate) {
@@ -328,6 +332,21 @@ impl Runner {
                 result.attempts_per_s
             ));
             results.push(result);
+            if result.attempts_per_s > best_attempts_per_s {
+                best_attempts_per_s = result.attempts_per_s;
+                best_result_at = results.len();
+            }
+            if results.len() >= GPU_TUNING_MIN_CASES
+                && results.len().saturating_sub(best_result_at) >= GPU_TUNING_STALE_CASES
+            {
+                self.log(format_args!(
+                    "{} 自动调优快速收敛：已测 {}/{} 组，提前结束。",
+                    label,
+                    index + 1,
+                    total_cases
+                ));
+                break;
+            }
         }
         let Some(selected) = select_gpu_tuning_result(&results) else {
             return Err(MiningError::Message(format!(
