@@ -27,8 +27,8 @@ use crate::{
 
 use self::support::{
     BenchmarkKey, RoundStatus, SelectedBackend, append_reward_code, check_cancel,
-    filter_candidates_for_params, load_persistent_benchmark_cache, save_persistent_benchmark_cache,
-    select_backend_workers, sleep_with_cancel,
+    filter_candidates_for_params, load_persistent_benchmark_cache, recommended_cpu_thread_limit,
+    save_persistent_benchmark_cache, select_backend_workers, sleep_with_cancel,
 };
 
 #[derive(Debug, Clone)]
@@ -259,6 +259,7 @@ impl Runner {
         job: &ComputeJob,
         start_nonce: u64,
         nonce_count: u64,
+        cpu_thread_limit: usize,
         stop_mining: &Arc<AtomicBool>,
     ) -> Result<BackendSession, MiningError> {
         match backend.kind {
@@ -271,16 +272,12 @@ impl Runner {
                     self.cpu_backend.start_mining_session(
                         job,
                         CpuMiningSessionConfig {
-                            workers: backend
-                                .profile
-                                .workers
-                                .max(1)
-                                .min(self.config.thread_count.max(1)),
+                            workers: backend.profile.workers.max(1).min(cpu_thread_limit.max(1)),
                             concurrency: backend
                                 .profile
                                 .concurrency
                                 .max(1)
-                                .min(self.config.thread_count.max(1)),
+                                .min(cpu_thread_limit.max(1)),
                             start_nonce,
                             nonce_count,
                         },
@@ -346,6 +343,7 @@ impl Runner {
         job: &ComputeJob,
         start_nonce: u64,
         nonce_count: u64,
+        cpu_thread_limit: usize,
         stop_mining: &Arc<AtomicBool>,
         sender: &mpsc::Sender<WorkerMessage>,
     ) -> thread::JoinHandle<()> {
@@ -361,6 +359,7 @@ impl Runner {
                 &job,
                 start_nonce,
                 nonce_count,
+                cpu_thread_limit,
                 &stop_mining,
             ) {
                 Ok(mut session) => match session.mine_until_stop() {
@@ -396,6 +395,13 @@ impl Runner {
         let ranges = assign_nonce_ranges(workers.len())?;
         let (sender, receiver) = mpsc::channel();
         let mut handles = Vec::new();
+        let cpu_thread_limit = recommended_cpu_thread_limit(workers, self.config.thread_count);
+        if cpu_thread_limit < self.config.thread_count.max(1) {
+            self.log(format_args!(
+                "GPU 速度占优，CPU 计算线程降为 {}，减少调度竞争。",
+                cpu_thread_limit
+            ));
+        }
         for (worker, (start_nonce, nonce_count)) in workers.iter().zip(ranges) {
             self.run_backend_self_test(worker, job)?;
             self.log(format_args!(
@@ -410,6 +416,7 @@ impl Runner {
                 job,
                 start_nonce,
                 nonce_count,
+                cpu_thread_limit,
                 stop_mining,
                 &sender,
             ));

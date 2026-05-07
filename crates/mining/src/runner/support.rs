@@ -164,6 +164,33 @@ pub(super) fn filter_candidates_for_params(
         .collect()
 }
 
+pub(super) fn recommended_cpu_thread_limit(
+    workers: &[SelectedBackend],
+    configured_thread_count: usize,
+) -> usize {
+    let configured_thread_count = configured_thread_count.max(1);
+    let Some(cpu_speed) = workers
+        .iter()
+        .filter(|worker| worker.kind == BackendKind::Cpu)
+        .map(|worker| worker.profile.attempts_per_s)
+        .max_by(f64::total_cmp)
+    else {
+        return configured_thread_count;
+    };
+    let Some(gpu_speed) = workers
+        .iter()
+        .filter(|worker| worker.kind != BackendKind::Cpu)
+        .map(|worker| worker.profile.attempts_per_s)
+        .max_by(f64::total_cmp)
+    else {
+        return configured_thread_count;
+    };
+    if cpu_speed > 0.0 && gpu_speed >= cpu_speed * 4.0 && configured_thread_count > 1 {
+        return configured_thread_count.div_ceil(2).max(1);
+    }
+    configured_thread_count
+}
+
 fn is_duplicate_gpu_backend(left: &SelectedBackend, right: &SelectedBackend) -> bool {
     if left.kind == BackendKind::Cpu || right.kind == BackendKind::Cpu {
         return false;
@@ -608,6 +635,22 @@ mod tests {
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].kind, BackendKind::Opencl);
         assert_eq!(filtered.len(), 1);
+    }
+
+    #[test]
+    fn recommended_cpu_thread_limit_halves_cpu_when_cuda_is_dominant() {
+        let cpu = backend(BackendKind::Cpu, "cpu", 13.0, 12);
+        let cuda = backend(BackendKind::Cuda, "cuda:0", 73.0, 86);
+
+        assert_eq!(recommended_cpu_thread_limit(&[cpu, cuda], 12), 6);
+    }
+
+    #[test]
+    fn recommended_cpu_thread_limit_keeps_cpu_when_gpu_is_not_dominant() {
+        let cpu = backend(BackendKind::Cpu, "cpu", 20.0, 12);
+        let cuda = backend(BackendKind::Cuda, "cuda:0", 50.0, 86);
+
+        assert_eq!(recommended_cpu_thread_limit(&[cpu, cuda], 12), 12);
     }
 
     #[test]

@@ -87,15 +87,34 @@ struct PreparedGpuBatch {
 struct SolverSessionState {
     std::unique_ptr<PreparedGpuBatch> prepared;
     std::vector<std::string> passwords;
+    std::uint64_t prepared_start_nonce = 0;
+    bool has_prepared_batch = false;
 
     SolverSessionState(const Job& job,
                        const SolverConfig& config,
-                       std::size_t device_index)
-        : prepared(std::make_unique<PreparedGpuBatch>(job, config, device_index, config.batch_size)),
+                       std::size_t device_index,
+                       std::uint64_t start_nonce)
+        : prepared(std::make_unique<PreparedGpuBatch>(
+              job,
+              config,
+              device_index,
+              config.batch_size)),
           passwords(config.batch_size) {
         for (auto& password : passwords) {
             password.reserve(job.pass_prefix().size() + 20);
         }
+        prepare_batch(job, config, start_nonce);
+    }
+
+    void prepare_batch(const Job& job,
+                       const SolverConfig& config,
+                       std::uint64_t start_nonce) {
+        for (std::size_t i = 0; i < config.batch_size; ++i) {
+            job.write_password_for_nonce(passwords[i], start_nonce + i);
+            prepared->unit->setPassword(i, passwords[i].data(), passwords[i].size());
+        }
+        prepared_start_nonce = start_nonce;
+        has_prepared_batch = true;
     }
 };
 
@@ -141,52 +160,6 @@ std::vector<std::uint8_t> compute_gpu_digest(const Job& job,
     return digest;
 }
 
-BatchResult mine_batch_gpu(const Job& job,
-                           const SolverConfig& config,
-                           std::uint64_t start_nonce,
-                           std::atomic_bool& stop,
-                           std::atomic<std::int64_t>& attempts,
-                           PreparedGpuBatch& prepared,
-                           std::vector<std::string>& passwords) {
-    for (std::size_t i = 0; i < config.batch_size; ++i) {
-        if (stop.load(std::memory_order_relaxed)) {
-            break;
-        }
-        job.write_password_for_nonce(passwords[i], start_nonce + i);
-        prepared.unit->setPassword(i, passwords[i].data(), passwords[i].size());
-    }
-
-    if (stop.load(std::memory_order_relaxed)) {
-        return {};
-    }
-
-    prepared.unit->beginProcessing();
-    prepared.unit->endProcessing();
-
-    BatchResult result;
-    std::int64_t local_attempts = 0;
-    for (std::size_t i = 0; i < config.batch_size; ++i) {
-        if (stop.load(std::memory_order_relaxed)) {
-            break;
-        }
-
-        std::array<std::uint8_t, kDigestSize> digest{};
-        prepared.unit->getHash(i, digest.data());
-        ++local_attempts;
-        if (meets_difficulty(digest.data(), digest.size(), job.difficulty_bits())) {
-            result.found = true;
-            result.nonce = start_nonce + i;
-            result.digest = digest;
-            stop.store(true, std::memory_order_relaxed);
-            break;
-        }
-    }
-    if (local_attempts > 0) {
-        attempts.fetch_add(local_attempts, std::memory_order_relaxed);
-    }
-    return result;
-}
-
 } // namespace
 
 Solver::Solver(std::size_t device_index) : device_index_(device_index) {
@@ -219,7 +192,11 @@ SolverSession Solver::create_session(const Job& job,
     SolverSession session;
     session.config = current_config;
     session.next_nonce = start_nonce;
-    session.state = std::make_unique<SolverSessionState>(job, current_config, device_index_);
+    session.state = std::make_unique<SolverSessionState>(
+        job,
+        current_config,
+        device_index_,
+        start_nonce);
     return session;
 }
 
@@ -231,16 +208,49 @@ SolveResult Solver::mine_next_batch(const Job& job,
         throw std::runtime_error("CUDA solver session is not initialized");
     }
 
+    auto& state = *session.state;
+    if (!state.has_prepared_batch || state.prepared_start_nonce != session.next_nonce) {
+        state.prepare_batch(job, session.config, session.next_nonce);
+    }
+
+    if (stop.load(std::memory_order_relaxed)) {
+        return {};
+    }
+
+    const auto current_start_nonce = session.next_nonce;
+    const auto next_start_nonce = current_start_nonce + session.config.batch_size;
+    state.prepared->unit->beginProcessing();
+    if (!stop.load(std::memory_order_relaxed)) {
+        // The ProcessingUnit API allows staging the next input batch after
+        // beginProcessing(), while the CUDA stream works on the current batch.
+        state.prepare_batch(job, session.config, next_start_nonce);
+    }
+    state.prepared->unit->endProcessing();
+
+    BatchResult batch;
+    std::int64_t local_attempts = 0;
+    for (std::size_t i = 0; i < session.config.batch_size; ++i) {
+        if (stop.load(std::memory_order_relaxed)) {
+            break;
+        }
+
+        std::array<std::uint8_t, kDigestSize> digest{};
+        state.prepared->unit->getHash(i, digest.data());
+        ++local_attempts;
+        if (meets_difficulty(digest.data(), digest.size(), job.difficulty_bits())) {
+            batch.found = true;
+            batch.nonce = current_start_nonce + i;
+            batch.digest = digest;
+            stop.store(true, std::memory_order_relaxed);
+            break;
+        }
+    }
+    if (local_attempts > 0) {
+        attempts.fetch_add(local_attempts, std::memory_order_relaxed);
+    }
+
+    session.next_nonce = next_start_nonce;
     SolveResult result;
-    const auto batch = mine_batch_gpu(
-        job,
-        session.config,
-        session.next_nonce,
-        stop,
-        attempts,
-        *session.state->prepared,
-        session.state->passwords);
-    session.next_nonce += session.config.batch_size;
     if (batch.found) {
         result.found = true;
         result.nonce = batch.nonce;
@@ -257,17 +267,11 @@ BenchmarkResult Solver::run_benchmark_case(const Job& job,
 
     std::atomic_bool stop{false};
     std::atomic<std::int64_t> attempts{0};
-    std::uint64_t next_nonce = 1;
-    PreparedGpuBatch prepared(job, config, device_index_, config.batch_size);
-    std::vector<std::string> passwords(config.batch_size);
-    for (auto& password : passwords) {
-        password.reserve(job.pass_prefix().size() + 20);
-    }
+    auto session = create_session(job, config, 1);
     const auto started_at = std::chrono::steady_clock::now();
 
     while (std::chrono::steady_clock::now() - started_at < duration) {
-        mine_batch_gpu(job, config, next_nonce, stop, attempts, prepared, passwords);
-        next_nonce += config.batch_size;
+        mine_next_batch(job, session, stop, attempts);
     }
 
     result.attempts = attempts.load();
