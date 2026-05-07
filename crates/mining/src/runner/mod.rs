@@ -279,9 +279,11 @@ impl Runner {
                     GpuMiningSessionConfig {
                         device_index: backend.device_index.unwrap_or(0),
                         batch_size: backend.profile.concurrency.max(1),
+                        session_count: backend.recommended_gpu_session_count(job),
                         by_segment: backend.profile.by_segment,
                         precompute_refs: backend.profile.precompute_refs,
                         start_nonce,
+                        nonce_count,
                     },
                     stop_mining,
                     &self.cancel,
@@ -293,9 +295,11 @@ impl Runner {
                     GpuMiningSessionConfig {
                         device_index: backend.device_index.unwrap_or(0),
                         batch_size: backend.profile.concurrency.max(1),
+                        session_count: 1,
                         by_segment: backend.profile.by_segment,
                         precompute_refs: backend.profile.precompute_refs,
                         start_nonce,
+                        nonce_count,
                     },
                     stop_mining,
                     &self.cancel,
@@ -307,9 +311,11 @@ impl Runner {
                     GpuMiningSessionConfig {
                         device_index: backend.device_index.unwrap_or(0),
                         batch_size: backend.profile.concurrency.max(1),
+                        session_count: 1,
                         by_segment: backend.profile.by_segment,
                         precompute_refs: backend.profile.precompute_refs,
                         start_nonce,
+                        nonce_count,
                     },
                     stop_mining,
                     &self.cancel,
@@ -377,8 +383,11 @@ impl Runner {
         for (worker, (start_nonce, nonce_count)) in workers.iter().zip(ranges) {
             self.run_backend_self_test(worker, job)?;
             self.log(format_args!(
-                "启动 {} 持久计算会话：nonce 起点 {}，区间长度 {}。",
-                worker.label, start_nonce, nonce_count
+                "启动 {} 持久计算会话：nonce 起点 {}，区间长度 {}，会话数 {}。",
+                worker.label,
+                start_nonce,
+                nonce_count,
+                worker.recommended_gpu_session_count(job)
             ));
             handles.push(self.spawn_backend_worker(
                 worker,

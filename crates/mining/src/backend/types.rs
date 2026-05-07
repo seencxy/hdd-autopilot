@@ -53,9 +53,11 @@ pub struct GpuBenchmarkConfig {
 pub struct GpuMiningSessionConfig {
     pub device_index: usize,
     pub batch_size: usize,
+    pub session_count: usize,
     pub by_segment: bool,
     pub precompute_refs: bool,
     pub start_nonce: u64,
+    pub nonce_count: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

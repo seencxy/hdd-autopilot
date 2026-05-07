@@ -306,9 +306,11 @@ impl MetalBackend {
         let GpuMiningSessionConfig {
             device_index,
             batch_size,
+            session_count: _,
             by_segment,
             precompute_refs,
             start_nonce,
+            nonce_count: _,
         } = config;
         metal_sys::validate_device(device_index).map_err(MiningError::Message)?;
         let session = metal_sys::create_session(

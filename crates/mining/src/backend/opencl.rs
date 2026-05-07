@@ -305,9 +305,11 @@ impl OpenclBackend {
         let GpuMiningSessionConfig {
             device_index,
             batch_size,
+            session_count: _,
             by_segment,
             precompute_refs,
             start_nonce,
+            nonce_count: _,
         } = config;
         let session = opencl_sys::create_session(
             device_index,

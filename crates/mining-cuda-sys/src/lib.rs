@@ -111,6 +111,8 @@ pub struct CudaMiningSession {
     raw: *mut mining_cuda_session,
 }
 
+unsafe impl Send for CudaMiningSession {}
+
 unsafe extern "C" {
     fn mining_cuda_is_available() -> bool;
     fn mining_cuda_validate() -> bool;

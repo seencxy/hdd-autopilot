@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::backend::types::estimated_argon2_batch_memory_bytes;
+use crate::backend::types::{GpuDeviceProfile, estimated_argon2_batch_memory_bytes};
 use crate::backend::{BackendDescriptor, BackendKind, BenchmarkResult, ComputeJob};
 use crate::{ChallengeResponse, MiningError};
 
@@ -16,6 +16,7 @@ pub(super) struct SelectedBackend {
     pub(super) name: String,
     pub(super) device_id: String,
     pub(super) device_index: Option<usize>,
+    pub(super) gpu_profile: Option<GpuDeviceProfile>,
     pub(super) params_key: BenchmarkKey,
     pub(super) profile: BenchmarkResult,
 }
@@ -37,6 +38,7 @@ impl SelectedBackend {
             name: descriptor.name.clone(),
             device_id: descriptor.device_id.clone(),
             device_index: descriptor.device_index,
+            gpu_profile: descriptor.gpu_profile,
             params_key,
             profile,
         }
@@ -68,8 +70,34 @@ impl SelectedBackend {
         }
         Some(format_memory_bytes(estimated_argon2_batch_memory_bytes(
             job.memory_cost_kib,
-            self.profile.concurrency,
+            self.profile
+                .concurrency
+                .saturating_mul(self.recommended_gpu_session_count(job)),
         )))
+    }
+
+    pub(super) fn recommended_gpu_session_count(&self, job: &ComputeJob) -> usize {
+        if self.kind != BackendKind::Cuda {
+            return 1;
+        }
+        let Some(profile) = self.gpu_profile else {
+            return 1;
+        };
+        let batch_size = self.profile.concurrency.max(1);
+        let compute_units = profile.compute_units as usize;
+        if compute_units == 0 {
+            return 1;
+        }
+        let needed_for_sm_coverage = compute_units.div_ceil(batch_size).clamp(1, 4);
+        let per_session_bytes =
+            estimated_argon2_batch_memory_bytes(job.memory_cost_kib, batch_size);
+        let usable_bytes = if profile.global_memory_bytes > 0 {
+            u128::from(profile.global_memory_bytes) * 90 / 100
+        } else {
+            per_session_bytes
+        };
+        let max_by_memory = (usable_bytes / per_session_bytes).clamp(1, 4) as usize;
+        needed_for_sm_coverage.min(max_by_memory).max(1)
     }
 }
 
@@ -350,6 +378,7 @@ mod tests {
                 BackendKind::Cpu => None,
                 BackendKind::Cuda | BackendKind::Metal | BackendKind::Opencl => Some(0),
             },
+            gpu_profile: None,
             params_key: params_key(),
             profile: BenchmarkResult {
                 workers,
@@ -361,6 +390,52 @@ mod tests {
                 attempts_per_s,
             },
         }
+    }
+
+    fn rtx_3090_profile() -> GpuDeviceProfile {
+        GpuDeviceProfile {
+            global_memory_bytes: 24 * 1024 * 1024 * 1024,
+            max_alloc_bytes: 24 * 1024 * 1024 * 1024,
+            compute_units: 82,
+            max_threads_per_group: 1024,
+            local_memory_bytes: 64 * 1024,
+            subgroup_size: 32,
+            unified_memory: false,
+            low_power: false,
+            removable: false,
+        }
+    }
+
+    #[test]
+    fn recommended_gpu_session_count_covers_cuda_sm_when_memory_allows() {
+        let mut cuda = backend(BackendKind::Cuda, "cuda:0", 100.0, 41);
+        cuda.gpu_profile = Some(rtx_3090_profile());
+        let job = ComputeJob {
+            seed_bytes: b"seed-a".to_vec(),
+            pass_prefix: b"prefix-a:".to_vec(),
+            time_cost: 1,
+            memory_cost_kib: 64 * 1024,
+            parallelism: 1,
+            difficulty_bits: 12,
+        };
+
+        assert_eq!(cuda.recommended_gpu_session_count(&job), 2);
+    }
+
+    #[test]
+    fn recommended_gpu_session_count_respects_cuda_memory_budget() {
+        let mut cuda = backend(BackendKind::Cuda, "cuda:0", 100.0, 84);
+        cuda.gpu_profile = Some(rtx_3090_profile());
+        let job = ComputeJob {
+            seed_bytes: b"seed-a".to_vec(),
+            pass_prefix: b"prefix-a:".to_vec(),
+            time_cost: 1,
+            memory_cost_kib: 256 * 1024,
+            parallelism: 1,
+            difficulty_bits: 12,
+        };
+
+        assert_eq!(cuda.recommended_gpu_session_count(&job), 1);
     }
 
     #[test]

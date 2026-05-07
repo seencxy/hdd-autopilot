@@ -1,5 +1,7 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::mpsc;
+use std::thread;
 use std::time::Duration;
 
 use mining_cuda_sys::{CudaDeviceInfo, CudaSolverConfig};
@@ -24,14 +26,33 @@ pub(crate) const GPU_FINALIST_COUNT: usize = 4;
 pub struct CudaBackend;
 
 pub struct CudaMiningSession {
-    session: cuda_sys::CudaMiningSession,
+    sessions: Vec<cuda_sys::CudaMiningSession>,
     job: ComputeJob,
     stop: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
 }
 
+enum CudaWorkerMessage {
+    Done,
+    Found { nonce: usize, digest: String },
+    Error(MiningError),
+}
+
 impl CudaMiningSession {
     pub fn mine_until_stop(&mut self) -> Result<MineBlockResult, MiningError> {
+        if self.sessions.len() <= 1 {
+            return self.mine_single_session();
+        }
+        self.mine_parallel_sessions()
+    }
+
+    fn mine_single_session(&mut self) -> Result<MineBlockResult, MiningError> {
+        if self.sessions.is_empty() {
+            return Ok(MineBlockResult {
+                found: None,
+                attempts: 0,
+            });
+        }
         loop {
             if self.cancel.load(Ordering::SeqCst) {
                 self.stop.store(true, Ordering::SeqCst);
@@ -44,7 +65,9 @@ impl CudaMiningSession {
                 });
             }
             let result = self
-                .session
+                .sessions
+                .get_mut(0)
+                .expect("single CUDA session should exist")
                 .mine_next_batch()
                 .map_err(MiningError::Message)?;
             if result.found {
@@ -66,6 +89,114 @@ impl CudaMiningSession {
                 });
             }
         }
+    }
+
+    fn mine_parallel_sessions(&mut self) -> Result<MineBlockResult, MiningError> {
+        let sessions = std::mem::take(&mut self.sessions);
+        let worker_count = sessions.len();
+        let attempts = Arc::new(AtomicI64::new(0));
+        let (sender, receiver) = mpsc::channel();
+        let mut handles = Vec::with_capacity(worker_count);
+
+        for mut session in sessions {
+            let sender = sender.clone();
+            let job = self.job.clone();
+            let stop = Arc::clone(&self.stop);
+            let cancel = Arc::clone(&self.cancel);
+            let attempts = Arc::clone(&attempts);
+            handles.push(thread::spawn(move || {
+                let mut last_attempts = 0i64;
+                loop {
+                    if cancel.load(Ordering::SeqCst) {
+                        stop.store(true, Ordering::SeqCst);
+                        let _ = sender.send(CudaWorkerMessage::Error(interrupted_error()));
+                        return;
+                    }
+                    if stop.load(Ordering::SeqCst) {
+                        let _ = sender.send(CudaWorkerMessage::Done);
+                        return;
+                    }
+                    let result = match session.mine_next_batch() {
+                        Ok(result) => result,
+                        Err(error) => {
+                            let _ =
+                                sender.send(CudaWorkerMessage::Error(MiningError::Message(error)));
+                            return;
+                        }
+                    };
+                    let delta = result.attempts.saturating_sub(last_attempts);
+                    if delta > 0 {
+                        attempts.fetch_add(delta, Ordering::Relaxed);
+                        last_attempts = result.attempts;
+                    }
+                    if result.found {
+                        let nonce = result.nonce as usize;
+                        let expected_digest = hex_lower(&compute_digest(&job, nonce));
+                        if result.digest_hex != expected_digest {
+                            let _ = sender.send(CudaWorkerMessage::Error(MiningError::Message(
+                                "CUDA 后端返回的摘要校验失败。".to_string(),
+                            )));
+                            return;
+                        }
+                        stop.store(true, Ordering::SeqCst);
+                        let _ = sender.send(CudaWorkerMessage::Found {
+                            nonce,
+                            digest: result.digest_hex,
+                        });
+                        return;
+                    }
+                }
+            }));
+        }
+        drop(sender);
+
+        let mut completed = 0usize;
+        let mut found: Option<(usize, String)> = None;
+        let mut first_error: Option<MiningError> = None;
+        while completed < worker_count {
+            match receiver.recv() {
+                Ok(CudaWorkerMessage::Done) => {
+                    completed += 1;
+                }
+                Ok(CudaWorkerMessage::Found { nonce, digest }) => {
+                    completed += 1;
+                    if found.is_none() {
+                        found = Some((nonce, digest));
+                        self.stop.store(true, Ordering::SeqCst);
+                    }
+                }
+                Ok(CudaWorkerMessage::Error(error)) => {
+                    completed += 1;
+                    self.stop.store(true, Ordering::SeqCst);
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        for handle in handles {
+            let _ = handle.join();
+        }
+
+        let attempts = attempts.load(Ordering::Relaxed);
+        if let Some((nonce, digest)) = found {
+            return Ok(MineBlockResult {
+                found: Some(MineResult {
+                    nonce,
+                    digest,
+                    attempts,
+                }),
+                attempts,
+            });
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        Ok(MineBlockResult {
+            found: None,
+            attempts,
+        })
     }
 }
 
@@ -292,33 +423,80 @@ impl CudaBackend {
         let GpuMiningSessionConfig {
             device_index,
             batch_size,
+            session_count,
             by_segment,
             precompute_refs,
             start_nonce,
+            nonce_count,
         } = config;
-        let session = cuda_sys::create_session(
-            device_index,
-            &cuda_sys::CudaJob {
-                seed_bytes: &job.seed_bytes,
-                pass_prefix: &job.pass_prefix,
-                time_cost: job.time_cost,
-                memory_cost_kib: job.memory_cost_kib,
-                parallelism: job.parallelism,
-                difficulty_bits: job.difficulty_bits,
-            },
-            cuda_sys::CudaSolverConfig {
-                batch_size: batch_size.max(1),
+        let session_count = session_count.max(1);
+        let mut last_error = None;
+        let mut sessions = Vec::new();
+        for requested_sessions in (1..=session_count).rev() {
+            match create_cuda_sessions(
+                device_index,
+                job,
+                batch_size.max(1),
+                requested_sessions,
                 by_segment,
                 precompute_refs,
-            },
-            start_nonce,
-        )
-        .map_err(MiningError::Message)?;
+                start_nonce,
+                nonce_count,
+            ) {
+                Ok(created) => {
+                    sessions = created;
+                    break;
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        if sessions.is_empty() {
+            return Err(last_error.unwrap_or_else(|| {
+                MiningError::Message("CUDA 持久计算会话创建失败。".to_string())
+            }));
+        }
         Ok(CudaMiningSession {
-            session,
+            sessions,
             job: job.clone(),
             stop: Arc::clone(stop),
             cancel: Arc::clone(cancel),
         })
     }
+}
+
+fn create_cuda_sessions(
+    device_index: usize,
+    job: &ComputeJob,
+    batch_size: usize,
+    session_count: usize,
+    by_segment: bool,
+    precompute_refs: bool,
+    start_nonce: u64,
+    nonce_count: u64,
+) -> Result<Vec<cuda_sys::CudaMiningSession>, MiningError> {
+    let raw_job = cuda_sys::CudaJob {
+        seed_bytes: &job.seed_bytes,
+        pass_prefix: &job.pass_prefix,
+        time_cost: job.time_cost,
+        memory_cost_kib: job.memory_cost_kib,
+        parallelism: job.parallelism,
+        difficulty_bits: job.difficulty_bits,
+    };
+    let raw_config = cuda_sys::CudaSolverConfig {
+        batch_size,
+        by_segment,
+        precompute_refs,
+    };
+    let session_count = session_count.max(1);
+    let span = nonce_count.max(session_count as u64) / session_count as u64;
+    let mut sessions = Vec::with_capacity(session_count);
+    for index in 0..session_count {
+        let offset = span.saturating_mul(index as u64);
+        let session_start = start_nonce.saturating_add(offset);
+        sessions.push(
+            cuda_sys::create_session(device_index, &raw_job, raw_config, session_start)
+                .map_err(MiningError::Message)?,
+        );
+    }
+    Ok(sessions)
 }

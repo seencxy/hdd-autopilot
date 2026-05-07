@@ -15,7 +15,11 @@ impl Runner {
         job: &ComputeJob,
     ) -> Result<Vec<SelectedBackend>, MiningError> {
         let mut candidates = self.collect_cuda_backend_candidates(job)?;
-        candidates.extend(self.collect_opencl_backend_candidates(job)?);
+        let skip_nvidia_opencl = candidates.iter().any(|candidate| {
+            candidate.kind == crate::backend::BackendKind::Cuda
+                && !candidate.device_id.trim().is_empty()
+        });
+        candidates.extend(self.collect_opencl_backend_candidates(job, skip_nvidia_opencl)?);
         candidates.extend(self.collect_metal_backend_candidates(job)?);
         Ok(candidates)
     }
@@ -51,6 +55,7 @@ impl Runner {
     fn collect_opencl_backend_candidates(
         &self,
         job: &ComputeJob,
+        skip_nvidia_opencl: bool,
     ) -> Result<Vec<SelectedBackend>, MiningError> {
         let opencl_availability = self.opencl_backend.detect_availability();
         if !opencl_availability.available {
@@ -63,9 +68,22 @@ impl Runner {
             return Ok(Vec::new());
         }
 
+        let mut devices = self.opencl_backend.list_devices()?;
+        if skip_nvidia_opencl {
+            let original_count = devices.len();
+            devices.retain(|descriptor| !is_nvidia_opencl_descriptor(descriptor));
+            let skipped = original_count.saturating_sub(devices.len());
+            if skipped > 0 {
+                self.log(format_args!(
+                    "CUDA 后端已经可用，跳过 {} 个 NVIDIA OpenCL 设备，避免同卡重复调优。",
+                    skipped
+                ));
+            }
+        }
+
         self.collect_gpu_candidates_by_device(
             "OpenCL",
-            self.opencl_backend.list_devices()?,
+            devices,
             job,
             BenchmarkKey::from(job),
             |descriptor| {
@@ -363,6 +381,11 @@ impl Runner {
         }
         Ok(())
     }
+}
+
+fn is_nvidia_opencl_descriptor(descriptor: &BackendDescriptor) -> bool {
+    let text = format!("{} {}", descriptor.name, descriptor.device_id).to_ascii_lowercase();
+    text.contains("nvidia") || text.contains("cuda")
 }
 
 fn estimated_gpu_memory_label(job: &ComputeJob, batch_size: usize) -> String {
