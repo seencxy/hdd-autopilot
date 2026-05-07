@@ -10,6 +10,7 @@ use super::support::{BenchmarkKey, SelectedBackend, format_memory_bytes, localiz
 const GPU_LARGE_BATCH_SPEED_FLOOR_RATIO: f64 = 0.90;
 const GPU_TUNING_MIN_CASES: usize = 12;
 const GPU_TUNING_STALE_CASES: usize = 9;
+const OPENCL_MIN_CUDA_SPEED_RATIO: f64 = 0.15;
 
 impl Runner {
     pub(super) fn collect_gpu_backend_candidates(
@@ -17,11 +18,20 @@ impl Runner {
         job: &ComputeJob,
     ) -> Result<Vec<SelectedBackend>, MiningError> {
         let mut candidates = self.collect_cuda_backend_candidates(job)?;
+        let cuda_baseline_speed = candidates
+            .iter()
+            .filter(|candidate| candidate.kind == crate::backend::BackendKind::Cuda)
+            .map(|candidate| candidate.profile.attempts_per_s)
+            .max_by(f64::total_cmp);
         let skip_nvidia_opencl = candidates.iter().any(|candidate| {
             candidate.kind == crate::backend::BackendKind::Cuda
                 && !candidate.device_id.trim().is_empty()
         });
-        candidates.extend(self.collect_opencl_backend_candidates(job, skip_nvidia_opencl)?);
+        candidates.extend(self.collect_opencl_backend_candidates(
+            job,
+            skip_nvidia_opencl,
+            cuda_baseline_speed,
+        )?);
         candidates.extend(self.collect_metal_backend_candidates(job)?);
         Ok(candidates)
     }
@@ -46,6 +56,7 @@ impl Runner {
             self.cuda_backend.list_devices()?,
             job,
             BenchmarkKey::from(job),
+            None,
             |descriptor| {
                 self.cuda_backend
                     .quick_screen_benchmark_for_descriptor(descriptor, job)
@@ -58,6 +69,7 @@ impl Runner {
         &self,
         job: &ComputeJob,
         skip_nvidia_opencl: bool,
+        cuda_baseline_speed: Option<f64>,
     ) -> Result<Vec<SelectedBackend>, MiningError> {
         let opencl_availability = self.opencl_backend.detect_availability();
         if !opencl_availability.available {
@@ -88,6 +100,7 @@ impl Runner {
             devices,
             job,
             BenchmarkKey::from(job),
+            cuda_baseline_speed.map(|speed| speed * OPENCL_MIN_CUDA_SPEED_RATIO),
             |descriptor| {
                 self.opencl_backend
                     .quick_screen_benchmark_for_descriptor(descriptor, job)
@@ -116,6 +129,7 @@ impl Runner {
             self.metal_backend.list_devices()?,
             job,
             BenchmarkKey::from(job),
+            None,
             |descriptor| {
                 self.metal_backend
                     .quick_screen_benchmark_for_descriptor(descriptor, job)
@@ -130,6 +144,7 @@ impl Runner {
         devices: Vec<BackendDescriptor>,
         job: &ComputeJob,
         params_key: BenchmarkKey,
+        min_screen_speed: Option<f64>,
         screen: FScreen,
         tune: FTune,
     ) -> Result<Vec<SelectedBackend>, MiningError>
@@ -160,6 +175,15 @@ impl Runner {
                         estimated_gpu_memory_label(job, result.concurrency),
                         result.attempts_per_s
                     ));
+                    if min_screen_speed.is_some_and(|minimum| {
+                        should_skip_slow_gpu_after_screen(result.attempts_per_s, minimum)
+                    }) {
+                        self.log(format_args!(
+                            "{} 设备 {} 初筛速度低于阈值，跳过完整调优。",
+                            label, descriptor.name
+                        ));
+                        continue;
+                    }
                     screened.push((descriptor, result));
                 }
                 Err(error) => {
@@ -407,6 +431,10 @@ fn is_nvidia_opencl_descriptor(descriptor: &BackendDescriptor) -> bool {
     text.contains("nvidia") || text.contains("cuda")
 }
 
+fn should_skip_slow_gpu_after_screen(attempts_per_s: f64, min_attempts_per_s: f64) -> bool {
+    attempts_per_s > 0.0 && min_attempts_per_s > 0.0 && attempts_per_s < min_attempts_per_s
+}
+
 fn estimated_gpu_memory_label(job: &ComputeJob, batch_size: usize) -> String {
     format_memory_bytes(estimated_argon2_batch_memory_bytes(
         job.memory_cost_kib,
@@ -445,7 +473,7 @@ mod tests {
 
     use crate::backend::BenchmarkResult;
 
-    use super::select_gpu_tuning_result;
+    use super::{select_gpu_tuning_result, should_skip_slow_gpu_after_screen};
 
     fn result(batch_size: usize, attempts_per_s: f64) -> BenchmarkResult {
         BenchmarkResult {
@@ -474,5 +502,11 @@ mod tests {
             .expect("selected tuning result");
 
         assert_eq!(selected.concurrency, 16);
+    }
+
+    #[test]
+    fn should_skip_slow_gpu_after_screen_filters_low_value_opencl() {
+        assert!(should_skip_slow_gpu_after_screen(7.0, 11.0));
+        assert!(!should_skip_slow_gpu_after_screen(12.0, 11.0));
     }
 }
