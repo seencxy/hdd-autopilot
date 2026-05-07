@@ -27,7 +27,8 @@ use crate::{
 
 use self::support::{
     BenchmarkKey, RoundStatus, SelectedBackend, append_reward_code, check_cancel,
-    filter_candidates_for_params, select_backend_workers, sleep_with_cancel,
+    filter_candidates_for_params, load_persistent_benchmark_cache, save_persistent_benchmark_cache,
+    select_backend_workers, sleep_with_cancel,
 };
 
 #[derive(Debug, Clone)]
@@ -85,6 +86,8 @@ fn join_candidate_thread(
 impl Runner {
     pub(crate) fn new(config: Config, cancel: Arc<AtomicBool>) -> Result<Self, MiningError> {
         let client = MiningClient::new(&config.base_url, config.http_timeout)?;
+        let benchmark_cache =
+            load_persistent_benchmark_cache(&config.benchmark_cache_file).unwrap_or_default();
         Ok(Self {
             config,
             client,
@@ -93,7 +96,7 @@ impl Runner {
             cuda_backend: CudaBackend::new(),
             metal_backend: MetalBackend::new(),
             opencl_backend: OpenclBackend::new(),
-            benchmark_cache: Arc::new(Mutex::new(HashMap::new())),
+            benchmark_cache: Arc::new(Mutex::new(benchmark_cache)),
             backend_blacklist: Arc::new(Mutex::new(HashSet::new())),
         })
     }
@@ -155,6 +158,7 @@ impl Runner {
             .get(&cache_key)
             .cloned()
         {
+            self.log_line("使用已缓存的自动调优结果。");
             return Ok(self.filter_blacklisted(filter_candidates_for_params(cached, &cache_key)));
         }
 
@@ -191,10 +195,22 @@ impl Runner {
         candidates.extend(gpu_candidates?);
         let candidates = filter_candidates_for_params(candidates, &cache_key);
 
-        self.benchmark_cache
-            .lock()
-            .expect("benchmark cache poisoned")
-            .insert(cache_key.clone(), candidates.clone());
+        let cache_snapshot = {
+            let mut cache = self
+                .benchmark_cache
+                .lock()
+                .expect("benchmark cache poisoned");
+            cache.insert(cache_key.clone(), candidates.clone());
+            cache.clone()
+        };
+        if let Err(error) =
+            save_persistent_benchmark_cache(&self.config.benchmark_cache_file, &cache_snapshot)
+        {
+            self.log(format_args!(
+                "自动调优磁盘缓存写入失败：{}",
+                humanize_error(&error)
+            ));
+        }
 
         Ok(self.filter_blacklisted(candidates))
     }

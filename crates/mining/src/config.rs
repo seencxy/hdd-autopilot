@@ -10,6 +10,7 @@ pub(crate) const DEFAULT_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
 pub(crate) const DEFAULT_INVITE_OUTPUT_FILE: &str = "var/data/mining/invite-codes.txt";
 pub(crate) const DEFAULT_BALANCE_OUTPUT_FILE: &str = "var/data/mining/balance-codes.txt";
+pub(crate) const DEFAULT_BENCHMARK_CACHE_FILE: &str = "var/data/mining/benchmark-cache.json";
 
 #[derive(Clone)]
 pub struct OutputSink {
@@ -69,6 +70,7 @@ pub struct Config {
     pub base_url: String,
     pub invite_output_file: PathBuf,
     pub balance_output_file: PathBuf,
+    pub benchmark_cache_file: PathBuf,
     pub thread_count: usize,
     pub http_timeout: Duration,
     pub heartbeat_interval: Duration,
@@ -119,6 +121,7 @@ pub(crate) fn default_config(mode: Mode) -> Config {
         base_url: DEFAULT_BASE_URL.to_string(),
         invite_output_file: PathBuf::from(DEFAULT_INVITE_OUTPUT_FILE),
         balance_output_file: PathBuf::from(DEFAULT_BALANCE_OUTPUT_FILE),
+        benchmark_cache_file: PathBuf::from(DEFAULT_BENCHMARK_CACHE_FILE),
         thread_count: CpuBackend::default_thread_count(),
         http_timeout: Duration::from_secs(30),
         heartbeat_interval: Duration::from_secs(4),

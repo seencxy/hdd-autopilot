@@ -5,9 +5,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
+
 use crate::backend::types::{GpuDeviceProfile, estimated_argon2_batch_memory_bytes};
 use crate::backend::{BackendDescriptor, BackendKind, BenchmarkResult, ComputeJob};
 use crate::{ChallengeResponse, MiningError};
+
+const PERSISTENT_BENCHMARK_CACHE_VERSION: u32 = 1;
 
 #[derive(Debug, Clone)]
 pub(super) struct SelectedBackend {
@@ -199,11 +203,42 @@ pub(super) struct RoundStatus {
     pub(super) inventory_depleted: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(super) struct BenchmarkKey {
     pub(super) memory_cost_kib: u32,
     pub(super) time_cost: u32,
     pub(super) parallelism: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistentBenchmarkCache {
+    version: u32,
+    entries: Vec<PersistentBenchmarkCacheEntry>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistentBenchmarkCacheEntry {
+    key: BenchmarkKey,
+    candidates: Vec<PersistentSelectedBackend>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistentSelectedBackend {
+    kind: BackendKind,
+    name: String,
+    device_id: String,
+    device_index: Option<usize>,
+    gpu_profile: Option<GpuDeviceProfile>,
+    profile: PersistentBenchmarkResult,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistentBenchmarkResult {
+    workers: usize,
+    concurrency: usize,
+    by_segment: bool,
+    precompute_refs: bool,
+    attempts_per_s: f64,
 }
 
 impl From<&ComputeJob> for BenchmarkKey {
@@ -213,6 +248,100 @@ impl From<&ComputeJob> for BenchmarkKey {
             time_cost: job.time_cost,
             parallelism: job.parallelism,
         }
+    }
+}
+
+pub(super) fn load_persistent_benchmark_cache(
+    path: &Path,
+) -> Result<std::collections::HashMap<BenchmarkKey, Vec<SelectedBackend>>, MiningError> {
+    if !path.is_file() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let bytes = fs::read(path)?;
+    let cache: PersistentBenchmarkCache = serde_json::from_slice(&bytes)?;
+    if cache.version != PERSISTENT_BENCHMARK_CACHE_VERSION {
+        return Ok(std::collections::HashMap::new());
+    }
+    let mut entries = std::collections::HashMap::new();
+    for entry in cache.entries {
+        let candidates = entry
+            .candidates
+            .into_iter()
+            .map(|candidate| candidate.into_selected_backend(entry.key.clone()))
+            .collect::<Vec<_>>();
+        if !candidates.is_empty() {
+            entries.insert(entry.key, candidates);
+        }
+    }
+    Ok(entries)
+}
+
+pub(super) fn save_persistent_benchmark_cache(
+    path: &Path,
+    entries: &std::collections::HashMap<BenchmarkKey, Vec<SelectedBackend>>,
+) -> Result<(), MiningError> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    let cache = PersistentBenchmarkCache {
+        version: PERSISTENT_BENCHMARK_CACHE_VERSION,
+        entries: entries
+            .iter()
+            .map(|(key, candidates)| PersistentBenchmarkCacheEntry {
+                key: key.clone(),
+                candidates: candidates
+                    .iter()
+                    .map(PersistentSelectedBackend::from_selected_backend)
+                    .collect(),
+            })
+            .collect(),
+    };
+    fs::write(path, serde_json::to_vec_pretty(&cache)?)?;
+    Ok(())
+}
+
+impl PersistentSelectedBackend {
+    fn from_selected_backend(candidate: &SelectedBackend) -> Self {
+        Self {
+            kind: candidate.kind,
+            name: candidate.name.clone(),
+            device_id: candidate.device_id.clone(),
+            device_index: candidate.device_index,
+            gpu_profile: candidate.gpu_profile,
+            profile: PersistentBenchmarkResult {
+                workers: candidate.profile.workers,
+                concurrency: candidate.profile.concurrency,
+                by_segment: candidate.profile.by_segment,
+                precompute_refs: candidate.profile.precompute_refs,
+                attempts_per_s: candidate.profile.attempts_per_s,
+            },
+        }
+    }
+
+    fn into_selected_backend(self, key: BenchmarkKey) -> SelectedBackend {
+        let descriptor = BackendDescriptor {
+            kind: self.kind,
+            name: self.name,
+            device_id: self.device_id,
+            device_index: self.device_index,
+            gpu_profile: self.gpu_profile,
+        };
+        SelectedBackend::new(
+            &descriptor,
+            BenchmarkResult {
+                workers: self.profile.workers,
+                concurrency: self.profile.concurrency,
+                by_segment: self.profile.by_segment,
+                precompute_refs: self.profile.precompute_refs,
+                attempts: 0,
+                elapsed: Duration::ZERO,
+                attempts_per_s: self.profile.attempts_per_s,
+            },
+            key,
+        )
     }
 }
 

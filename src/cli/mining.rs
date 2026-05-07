@@ -46,11 +46,13 @@ pub(super) fn show_mining_menu() -> bool {
 fn show_mining_runtime_menu(mode: Mode) -> bool {
     let invite_output_file = resolve_data_file_path("mining/invite-codes.txt");
     let balance_output_file = resolve_data_file_path("mining/balance-codes.txt");
+    let benchmark_cache_file = resolve_data_file_path("mining/benchmark-cache.json");
     let result =
         ui::run_with_escape_interrupt("自动挖矿运行中。", None, move |cancel_flag, log| {
             let mut config = default_config_for_mode(mode);
             config.invite_output_file = invite_output_file.clone();
             config.balance_output_file = balance_output_file.clone();
+            config.benchmark_cache_file = benchmark_cache_file.clone();
             config.output = OutputSink::new(move |line| log.line(line));
             run_auto_tuned_with_config_and_cancel(config, &cancel_flag).map_err(io::Error::other)
         });
