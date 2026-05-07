@@ -17,7 +17,9 @@ pub struct BackendDescriptor {
     pub gpu_profile: Option<GpuDeviceProfile>,
 }
 
-pub use super::tuning::{GpuDeviceProfile, recommended_gpu_tuning_shapes};
+pub use super::tuning::{
+    GpuDeviceProfile, estimated_argon2_batch_memory_bytes, recommended_gpu_tuning_shapes,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BenchmarkResult {

@@ -7,6 +7,8 @@ use crate::{MiningError, humanize_error};
 use super::Runner;
 use super::support::{BenchmarkKey, SelectedBackend, localized_bool};
 
+const GPU_LARGE_BATCH_SPEED_FLOOR_RATIO: f64 = 0.97;
+
 impl Runner {
     pub(super) fn collect_gpu_backend_candidates(
         &self,
@@ -271,7 +273,7 @@ impl Runner {
         FRun: Fn(TConfig) -> Result<BenchmarkResult, MiningError>,
     {
         let total_cases = templates.len();
-        let mut best: Option<BenchmarkResult> = None;
+        let mut results = Vec::new();
         for (index, candidate) in templates.iter().copied().enumerate() {
             self.check_cancel()?;
             let result = match run(candidate) {
@@ -299,14 +301,26 @@ impl Runner {
                 localized_bool(result.precompute_refs),
                 result.attempts_per_s
             ));
-            if best
-                .as_ref()
-                .is_none_or(|existing| result.attempts_per_s > existing.attempts_per_s)
-            {
-                best = Some(result);
-            }
+            results.push(result);
         }
-        best.ok_or_else(|| MiningError::Message(format!("{} 自动调优没有得到可用结果。", label)))
+        let Some(selected) = select_gpu_tuning_result(&results) else {
+            return Err(MiningError::Message(format!(
+                "{} 自动调优没有得到可用结果。",
+                label
+            )));
+        };
+        if let Some(fastest) = fastest_gpu_tuning_result(&results)
+            && selected.concurrency != fastest.concurrency
+            && fastest.attempts_per_s > 0.0
+        {
+            let loss_percent = (fastest.attempts_per_s - selected.attempts_per_s).max(0.0) * 100.0
+                / fastest.attempts_per_s;
+            self.log(format_args!(
+                "{} 自动调优：批大小 {} 与最高速批大小 {} 相差约 {:.1}%，优先使用更大的 GPU 批大小。",
+                label, selected.concurrency, fastest.concurrency, loss_percent
+            ));
+        }
+        Ok(selected)
     }
 
     pub(super) fn filter_blacklisted(
@@ -340,5 +354,68 @@ impl Runner {
             )));
         }
         Ok(())
+    }
+}
+
+fn fastest_gpu_tuning_result(results: &[BenchmarkResult]) -> Option<BenchmarkResult> {
+    results.iter().copied().max_by(|left, right| {
+        left.attempts_per_s
+            .total_cmp(&right.attempts_per_s)
+            .then_with(|| left.concurrency.cmp(&right.concurrency))
+    })
+}
+
+fn select_gpu_tuning_result(results: &[BenchmarkResult]) -> Option<BenchmarkResult> {
+    let fastest = fastest_gpu_tuning_result(results)?;
+    if fastest.attempts_per_s <= 0.0 {
+        return Some(fastest);
+    }
+    let floor = fastest.attempts_per_s * GPU_LARGE_BATCH_SPEED_FLOOR_RATIO;
+    results
+        .iter()
+        .copied()
+        .filter(|result| result.attempts_per_s >= floor)
+        .max_by(|left, right| {
+            left.concurrency
+                .cmp(&right.concurrency)
+                .then_with(|| left.attempts_per_s.total_cmp(&right.attempts_per_s))
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use crate::backend::BenchmarkResult;
+
+    use super::select_gpu_tuning_result;
+
+    fn result(batch_size: usize, attempts_per_s: f64) -> BenchmarkResult {
+        BenchmarkResult {
+            workers: batch_size,
+            concurrency: batch_size,
+            by_segment: true,
+            precompute_refs: true,
+            attempts: 1,
+            elapsed: Duration::from_secs(1),
+            attempts_per_s,
+        }
+    }
+
+    #[test]
+    fn select_gpu_tuning_result_prefers_larger_batch_when_speed_is_close() {
+        let selected =
+            select_gpu_tuning_result(&[result(16, 100.0), result(128, 98.0), result(256, 95.0)])
+                .expect("selected tuning result");
+
+        assert_eq!(selected.concurrency, 128);
+    }
+
+    #[test]
+    fn select_gpu_tuning_result_keeps_fastest_when_larger_batch_is_too_slow() {
+        let selected = select_gpu_tuning_result(&[result(16, 100.0), result(128, 90.0)])
+            .expect("selected tuning result");
+
+        assert_eq!(selected.concurrency, 16);
     }
 }

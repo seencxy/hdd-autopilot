@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::backend::types::estimated_argon2_batch_memory_bytes;
 use crate::backend::{BackendDescriptor, BackendKind, BenchmarkResult, ComputeJob};
 use crate::{ChallengeResponse, MiningError};
 
@@ -59,6 +60,16 @@ impl SelectedBackend {
 
     pub(super) fn speed_label(&self) -> String {
         format!("{:.2}", self.profile.attempts_per_s)
+    }
+
+    pub(super) fn estimated_gpu_memory_label(&self, job: &ComputeJob) -> Option<String> {
+        if self.kind == BackendKind::Cpu {
+            return None;
+        }
+        Some(format_memory_bytes(estimated_argon2_batch_memory_bytes(
+            job.memory_cost_kib,
+            self.profile.concurrency,
+        )))
     }
 }
 
@@ -218,6 +229,16 @@ pub(super) fn current_unix_ms() -> i64 {
 
 pub(super) fn localized_bool(value: bool) -> &'static str {
     if value { "是" } else { "否" }
+}
+
+pub(super) fn format_memory_bytes(bytes: u128) -> String {
+    const MIB: u128 = 1024 * 1024;
+    const GIB: u128 = 1024 * MIB;
+    if bytes >= GIB {
+        format!("{:.1} GiB", bytes as f64 / GIB as f64)
+    } else {
+        format!("{} MiB", bytes.div_ceil(MIB))
+    }
 }
 
 pub(super) fn append_reward_code(

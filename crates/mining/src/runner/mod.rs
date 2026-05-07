@@ -483,8 +483,13 @@ impl Runner {
             other => MiningError::Message(format!("获取挑战失败: {}", humanize_error(&other))),
         })?;
         self.log(format_args!(
-            "挑战 #{}，轮次 #{}，难度 {}",
-            challenge.challenge_id, challenge.round_id, challenge.difficulty_bits
+            "挑战 #{}，轮次 #{}，难度 {}，time_cost {}，memory_cost {} MiB，parallelism {}",
+            challenge.challenge_id,
+            challenge.round_id,
+            challenge.difficulty_bits,
+            challenge.time_cost,
+            challenge.memory_cost_mb,
+            challenge.parallelism
         ));
 
         let job = ComputeJob::from(&challenge);
@@ -504,20 +509,30 @@ impl Runner {
             .any(|worker| worker.kind != BackendKind::Cpu);
         if selected_workers.len() == 1 {
             let selected = &selected_workers[0];
+            let memory_detail = selected
+                .estimated_gpu_memory_label(&job)
+                .map(|label| format!("，预计显存 {}", label))
+                .unwrap_or_default();
             self.log(format_args!(
-                "本轮使用 {} 后端：{}，预计速度约 {} 次/秒。",
+                "本轮使用 {} 后端：{}{}，预计速度约 {} 次/秒。",
                 selected.label,
                 selected.selection_detail(),
+                memory_detail,
                 selected.speed_label()
             ));
         } else {
             let labels = selected_workers
                 .iter()
                 .map(|worker| {
+                    let memory_detail = worker
+                        .estimated_gpu_memory_label(&job)
+                        .map(|label| format!("，预计显存 {}", label))
+                        .unwrap_or_default();
                     format!(
-                        "{}({}，约 {} 次/秒)",
+                        "{}({}{}，约 {} 次/秒)",
                         worker.label,
                         worker.selection_detail(),
+                        memory_detail,
                         worker.speed_label()
                     )
                 })

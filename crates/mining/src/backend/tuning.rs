@@ -75,12 +75,16 @@ pub fn recommended_gpu_tuning_shapes(
     shapes
 }
 
+pub fn estimated_argon2_batch_memory_bytes(memory_cost_kib: u32, batch_size: usize) -> u128 {
+    u128::from(memory_cost_kib.max(1)) * 1024 * batch_size.max(1) as u128
+}
+
 fn recommended_max_batch(
     profile: Option<GpuDeviceProfile>,
     memory_cost_kib: u32,
-    parallelism: u32,
+    _parallelism: u32,
 ) -> usize {
-    let bytes_per_job = u128::from(memory_cost_kib.max(1)) * 1024 * u128::from(parallelism.max(1));
+    let bytes_per_job = estimated_argon2_batch_memory_bytes(memory_cost_kib, 1);
     let Some(profile) = profile else {
         return 1024;
     };
@@ -207,7 +211,9 @@ fn strategy_order(profile: Option<GpuDeviceProfile>) -> [(bool, bool); 3] {
 
 #[cfg(test)]
 mod tests {
-    use super::{GpuDeviceProfile, recommended_gpu_tuning_shapes};
+    use super::{
+        GpuDeviceProfile, estimated_argon2_batch_memory_bytes, recommended_gpu_tuning_shapes,
+    };
 
     #[test]
     fn recommended_gpu_tuning_shapes_respects_memory_limit() {
@@ -252,6 +258,36 @@ mod tests {
         assert_eq!(shapes[0].batch_size, 128);
         assert!(shapes[0].by_segment);
         assert!(shapes[0].precompute_refs);
+    }
+
+    #[test]
+    fn recommended_gpu_tuning_shapes_treats_argon2_memory_as_total_per_job() {
+        let shapes = recommended_gpu_tuning_shapes(
+            Some(GpuDeviceProfile {
+                global_memory_bytes: 24 * 1024 * 1024 * 1024,
+                max_alloc_bytes: 24 * 1024 * 1024 * 1024,
+                compute_units: 82,
+                max_threads_per_group: 1024,
+                local_memory_bytes: 64 * 1024,
+                subgroup_size: 32,
+                unified_memory: false,
+                low_power: false,
+                removable: false,
+            }),
+            64 * 1024,
+            2,
+        );
+        let max_batch = shapes
+            .iter()
+            .map(|shape| shape.batch_size)
+            .max()
+            .expect("recommended shapes");
+
+        assert!(max_batch >= 240);
+        assert_eq!(
+            estimated_argon2_batch_memory_bytes(64 * 1024, 16),
+            1024 * 1024 * 1024
+        );
     }
 
     #[test]
