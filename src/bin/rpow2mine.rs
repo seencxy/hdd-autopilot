@@ -517,7 +517,7 @@ Environment:
   RPOW2_COOKIE   Cookie header copied from an authenticated rpow2.com browser session
 
 Notes:
-  Windows GPU mining uses CUDA and defaults to batch 268435456, 256 threads/block, 4 nonces/thread
+  Windows GPU mining uses CUDA and defaults to batch 268435456, 512 threads/block, 4 nonces/thread
   --gpu-batch-size 0 enables automatic GPU batch tuning
   --gpu-max-blocks 0 uses an SM-based automatic grid size
   --loop defaults to challenge prefetch 8 and mint workers 2 on Windows

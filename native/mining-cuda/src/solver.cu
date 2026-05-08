@@ -499,9 +499,16 @@ struct Rpow2CudaDeviceResult {
 	    return rpow2_rotr32(value, 7u) ^ rpow2_rotr32(value, 18u) ^ (value >> 3);
 	}
 
-	__device__ __forceinline__ std::uint32_t rpow2_small_sigma1(std::uint32_t value) {
-	    return rpow2_rotr32(value, 17u) ^ rpow2_rotr32(value, 19u) ^ (value >> 10);
-	}
+		__device__ __forceinline__ std::uint32_t rpow2_small_sigma1(std::uint32_t value) {
+		    return rpow2_rotr32(value, 17u) ^ rpow2_rotr32(value, 19u) ^ (value >> 10);
+		}
+
+		__device__ __forceinline__ std::uint32_t rpow2_bswap32(std::uint32_t value) {
+		    return ((value & 0x000000ffu) << 24)
+		        | ((value & 0x0000ff00u) << 8)
+		        | ((value & 0x00ff0000u) >> 8)
+		        | ((value & 0xff000000u) >> 24);
+		}
 
 	std::uint32_t rpow2_rotr32_host(std::uint32_t value, unsigned int bits) {
 	    return (value >> bits) | (value << (32u - bits));
@@ -613,9 +620,9 @@ __device__ std::uint32_t rpow2_trailing_zero_bits(std::uint32_t h0,
 	    *h7 += h;
 	}
 
-	__device__ __forceinline__ void rpow2_hash_nonce(const Rpow2CudaKernelParams& params,
-	                                                 unsigned long long nonce,
-	                                                 std::uint32_t* h0,
+		__device__ __forceinline__ void rpow2_hash_nonce(const Rpow2CudaKernelParams& params,
+		                                                 unsigned long long nonce,
+		                                                 std::uint32_t* h0,
 	                                                 std::uint32_t* h1,
 	                                                 std::uint32_t* h2,
 	                                                 std::uint32_t* h3,
@@ -640,13 +647,52 @@ __device__ std::uint32_t rpow2_trailing_zero_bits(std::uint32_t h0,
 	            w[i] = params.template_words[block * 16u + i];
 	        }
 	        rpow2_write_nonce_words(w, block, params.nonce_offset, nonce);
-	        rpow2_compress_block(h0, h1, h2, h3, h4, h5, h6, h7, w);
-	    }
-	}
+		        rpow2_compress_block(h0, h1, h2, h3, h4, h5, h6, h7, w);
+		    }
+		}
 
-	template <unsigned int NoncesPerThread>
-	__global__ __launch_bounds__(512, 2) void rpow2_mine_kernel(Rpow2CudaKernelParams params,
-	                                                            Rpow2CudaDeviceResult* result) {
+		__device__ __forceinline__ void rpow2_hash_nonce_prefix16(const Rpow2CudaKernelParams& params,
+		                                                         unsigned long long nonce,
+		                                                         std::uint32_t* h0,
+		                                                         std::uint32_t* h1,
+		                                                         std::uint32_t* h2,
+		                                                         std::uint32_t* h3,
+		                                                         std::uint32_t* h4,
+		                                                         std::uint32_t* h5,
+		                                                         std::uint32_t* h6,
+		                                                         std::uint32_t* h7) {
+		    *h0 = 0x6a09e667;
+		    *h1 = 0xbb67ae85;
+		    *h2 = 0x3c6ef372;
+		    *h3 = 0xa54ff53a;
+		    *h4 = 0x510e527f;
+		    *h5 = 0x9b05688c;
+		    *h6 = 0x1f83d9ab;
+		    *h7 = 0x5be0cd19;
+
+		    std::uint32_t w[16];
+		    w[0] = params.template_words[0];
+		    w[1] = params.template_words[1];
+		    w[2] = params.template_words[2];
+		    w[3] = params.template_words[3];
+		    w[4] = rpow2_bswap32(static_cast<std::uint32_t>(nonce));
+		    w[5] = rpow2_bswap32(static_cast<std::uint32_t>(nonce >> 32));
+		    w[6] = 0x80000000u;
+		    w[7] = 0u;
+		    w[8] = 0u;
+		    w[9] = 0u;
+		    w[10] = 0u;
+		    w[11] = 0u;
+		    w[12] = 0u;
+		    w[13] = 0u;
+		    w[14] = 0u;
+		    w[15] = 192u;
+		    rpow2_compress_block(h0, h1, h2, h3, h4, h5, h6, h7, w);
+		}
+
+		template <unsigned int NoncesPerThread>
+		__global__ __launch_bounds__(512, 2) void rpow2_mine_kernel(Rpow2CudaKernelParams params,
+		                                                            Rpow2CudaDeviceResult* result) {
 	    const unsigned long long thread_id = static_cast<unsigned long long>(blockIdx.x)
 	        * static_cast<unsigned long long>(blockDim.x)
 	        + static_cast<unsigned long long>(threadIdx.x);
@@ -695,11 +741,65 @@ __device__ std::uint32_t rpow2_trailing_zero_bits(std::uint32_t h0,
 	                return;
 	            }
 	        }
-	    }
-	}
+		    }
+		}
 
-	__global__ void rpow2_empty_kernel() {
-	}
+		template <unsigned int NoncesPerThread>
+		__global__ __launch_bounds__(512, 2) void rpow2_mine_prefix16_kernel(Rpow2CudaKernelParams params,
+		                                                                     Rpow2CudaDeviceResult* result) {
+		    const unsigned long long thread_id = static_cast<unsigned long long>(blockIdx.x)
+		        * static_cast<unsigned long long>(blockDim.x)
+		        + static_cast<unsigned long long>(threadIdx.x);
+		    const unsigned long long thread_stride = static_cast<unsigned long long>(gridDim.x)
+		        * static_cast<unsigned long long>(blockDim.x);
+		    const unsigned long long group_stride = thread_stride
+		        * static_cast<unsigned long long>(NoncesPerThread);
+		    const volatile unsigned int* found_flag =
+		        reinterpret_cast<const volatile unsigned int*>(&result->found);
+
+		    for (unsigned long long group_offset = thread_id * static_cast<unsigned long long>(NoncesPerThread);
+		         group_offset < params.batch_size;
+		         group_offset += group_stride) {
+		        if (*found_flag != 0u) {
+		            return;
+		        }
+#pragma unroll
+		        for (unsigned int item = 0; item < NoncesPerThread; ++item) {
+		            const unsigned long long offset = group_offset + static_cast<unsigned long long>(item);
+		            if (offset >= params.batch_size) {
+		                return;
+		            }
+		            const unsigned long long nonce = params.start_nonce + offset;
+		            std::uint32_t h0;
+		            std::uint32_t h1;
+		            std::uint32_t h2;
+		            std::uint32_t h3;
+		            std::uint32_t h4;
+		            std::uint32_t h5;
+		            std::uint32_t h6;
+		            std::uint32_t h7;
+		            rpow2_hash_nonce_prefix16(params, nonce, &h0, &h1, &h2, &h3, &h4, &h5, &h6, &h7);
+
+		            if (rpow2_trailing_zero_bits(h0, h1, h2, h3, h4, h5, h6, h7) >= params.difficulty_bits) {
+		                if (atomicCAS(&result->found, 0u, 1u) == 0u) {
+		                    result->nonce = nonce;
+		                    result->digest_words[0] = h0;
+		                    result->digest_words[1] = h1;
+		                    result->digest_words[2] = h2;
+		                    result->digest_words[3] = h3;
+		                    result->digest_words[4] = h4;
+		                    result->digest_words[5] = h5;
+		                    result->digest_words[6] = h6;
+		                    result->digest_words[7] = h7;
+		                }
+		                return;
+		            }
+		        }
+		    }
+		}
+
+		__global__ void rpow2_empty_kernel() {
+		}
 
 void check_cuda(cudaError_t status, const char* message) {
     if (status != cudaSuccess) {
@@ -906,34 +1006,72 @@ Rpow2CudaSession::~Rpow2CudaSession() {
 
 	namespace {
 
-	template <unsigned int NoncesPerThread>
-	void launch_rpow2_kernel(unsigned int blocks,
-	                         unsigned int threads_per_block,
-	                         const Rpow2CudaKernelParams& params,
-	                         Rpow2CudaDeviceResult* result) {
-	    rpow2_mine_kernel<NoncesPerThread><<<blocks, threads_per_block>>>(params, result);
-	}
+		template <unsigned int NoncesPerThread>
+		void launch_rpow2_kernel(unsigned int blocks,
+		                         unsigned int threads_per_block,
+		                         const Rpow2CudaKernelParams& params,
+		                         Rpow2CudaDeviceResult* result) {
+		    rpow2_mine_kernel<NoncesPerThread><<<blocks, threads_per_block>>>(params, result);
+		}
 
-	void launch_rpow2_kernel(unsigned int blocks,
-	                         unsigned int threads_per_block,
-	                         std::uint32_t nonces_per_thread,
-	                         const Rpow2CudaKernelParams& params,
-	                         Rpow2CudaDeviceResult* result) {
-	    switch (nonces_per_thread) {
-	    case 1:
-	        launch_rpow2_kernel<1>(blocks, threads_per_block, params, result);
-	        break;
-	    case 2:
-	        launch_rpow2_kernel<2>(blocks, threads_per_block, params, result);
-	        break;
-	    case 4:
-	        launch_rpow2_kernel<4>(blocks, threads_per_block, params, result);
-	        break;
-	    case 8:
-	        launch_rpow2_kernel<8>(blocks, threads_per_block, params, result);
-	        break;
-	    default:
-	        throw std::runtime_error("unsupported RPOW2 CUDA nonces_per_thread");
+		template <unsigned int NoncesPerThread>
+		void launch_rpow2_prefix16_kernel(unsigned int blocks,
+		                                  unsigned int threads_per_block,
+		                                  const Rpow2CudaKernelParams& params,
+		                                  Rpow2CudaDeviceResult* result) {
+		    rpow2_mine_prefix16_kernel<NoncesPerThread><<<blocks, threads_per_block>>>(params, result);
+		}
+
+		bool is_rpow2_prefix16_fast_path(const Rpow2CudaKernelParams& params) {
+		    return params.block_count == 1u
+		        && params.nonce_offset == 16u
+		        && params.initial_state[0] == 0x6a09e667u
+		        && params.initial_state[1] == 0xbb67ae85u
+		        && params.initial_state[2] == 0x3c6ef372u
+		        && params.initial_state[3] == 0xa54ff53au
+		        && params.initial_state[4] == 0x510e527fu
+		        && params.initial_state[5] == 0x9b05688cu
+		        && params.initial_state[6] == 0x1f83d9abu
+		        && params.initial_state[7] == 0x5be0cd19u;
+		}
+
+		void launch_rpow2_kernel(unsigned int blocks,
+		                         unsigned int threads_per_block,
+		                         std::uint32_t nonces_per_thread,
+		                         const Rpow2CudaKernelParams& params,
+		                         Rpow2CudaDeviceResult* result) {
+		    const bool prefix16_fast_path = is_rpow2_prefix16_fast_path(params);
+		    switch (nonces_per_thread) {
+		    case 1:
+		        if (prefix16_fast_path) {
+		            launch_rpow2_prefix16_kernel<1>(blocks, threads_per_block, params, result);
+		        } else {
+		            launch_rpow2_kernel<1>(blocks, threads_per_block, params, result);
+		        }
+		        break;
+		    case 2:
+		        if (prefix16_fast_path) {
+		            launch_rpow2_prefix16_kernel<2>(blocks, threads_per_block, params, result);
+		        } else {
+		            launch_rpow2_kernel<2>(blocks, threads_per_block, params, result);
+		        }
+		        break;
+		    case 4:
+		        if (prefix16_fast_path) {
+		            launch_rpow2_prefix16_kernel<4>(blocks, threads_per_block, params, result);
+		        } else {
+		            launch_rpow2_kernel<4>(blocks, threads_per_block, params, result);
+		        }
+		        break;
+		    case 8:
+		        if (prefix16_fast_path) {
+		            launch_rpow2_prefix16_kernel<8>(blocks, threads_per_block, params, result);
+		        } else {
+		            launch_rpow2_kernel<8>(blocks, threads_per_block, params, result);
+		        }
+		        break;
+		    default:
+		        throw std::runtime_error("unsupported RPOW2 CUDA nonces_per_thread");
 	    }
 	}
 
@@ -1123,6 +1261,11 @@ Rpow2CudaSession::~Rpow2CudaSession() {
 
 	double benchmark_empty_launch_microseconds(std::size_t device_index) {
 	    check_cuda(cudaSetDevice(static_cast<int>(device_index)), "cudaSetDevice failed");
+	    for (int index = 0; index < 16; ++index) {
+	        rpow2_empty_kernel<<<1, 1>>>();
+	    }
+	    check_cuda(cudaGetLastError(), "RPOW2 empty kernel warmup failed");
+	    check_cuda(cudaDeviceSynchronize(), "RPOW2 empty kernel warmup sync failed");
 	    constexpr int iterations = 1000;
 	    const auto started = std::chrono::steady_clock::now();
 	    for (int index = 0; index < iterations; ++index) {

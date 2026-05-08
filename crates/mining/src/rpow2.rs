@@ -15,12 +15,14 @@ const CPU_ATTEMPT_FLUSH_INTERVAL: i64 = 4096;
 const AUTO_GPU_BATCH_SIZE: u64 = 0;
 pub const FULL_CUDA_BATCH_SIZE: u64 = 1 << 31;
 pub const DEFAULT_CUDA_BATCH_SIZE: u64 = 1 << 28;
-pub const DEFAULT_CUDA_THREADS_PER_BLOCK: u32 = 256;
+pub const DEFAULT_CUDA_THREADS_PER_BLOCK: u32 = 512;
 pub const DEFAULT_CUDA_NONCES_PER_THREAD: u32 = 4;
 pub const DEFAULT_CUDA_MAX_BLOCKS: u32 = 0;
 const FALLBACK_CUDA_BATCH_SIZE: u64 = DEFAULT_CUDA_BATCH_SIZE;
+#[cfg(target_os = "macos")]
 const FALLBACK_METAL_BATCH_SIZE: u64 = 1 << 22;
 const CUDA_AUTO_TUNE_BATCH_SIZES: [u64; 4] = [1 << 24, 1 << 26, DEFAULT_CUDA_BATCH_SIZE, 1 << 30];
+#[cfg(target_os = "macos")]
 const METAL_AUTO_TUNE_BATCH_SIZES: [u64; 4] = [1 << 18, 1 << 20, 1 << 22, 1 << 24];
 const RPOW2_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
