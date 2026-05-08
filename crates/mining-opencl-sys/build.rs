@@ -14,6 +14,8 @@ fn main() {
     println!("cargo:rerun-if-env-changed=OPENCL_ROOT");
     println!("cargo:rerun-if-env-changed=OpenCL_ROOT");
     println!("cargo:rerun-if-env-changed=VCPKG_ROOT");
+    println!("cargo:rerun-if-env-changed=HDD_AUTOPILOT_DISABLE_OPENCL");
+    println!("cargo:rerun-if-env-changed=HDD_AUTOPILOT_FORCE_OPENCL");
     println!("cargo:rerun-if-changed=../../native/mining-opencl/CMakeLists.txt");
     println!("cargo:rerun-if-changed=../../native/mining-opencl/include");
     println!("cargo:rerun-if-changed=../../native/mining-opencl/src");
@@ -26,6 +28,10 @@ fn main() {
 
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os != "macos" && target_os != "linux" && target_os != "windows" {
+        return;
+    }
+    if env_flag("HDD_AUTOPILOT_DISABLE_OPENCL") {
+        warn_native_disabled("HDD_AUTOPILOT_DISABLE_OPENCL is set");
         return;
     }
 
@@ -61,6 +67,15 @@ fn main() {
 
     if target_os == "windows" && !host_is_windows() {
         warn_native_disabled("host is not Windows; skipping OpenCL native backend");
+        return;
+    }
+    if target_os == "windows"
+        && !env_flag("HDD_AUTOPILOT_FORCE_OPENCL")
+        && windows_cuda_toolkit_present()
+    {
+        warn_native_disabled(
+            "CUDA Toolkit detected; skipping Windows OpenCL native backend to avoid duplicate native solver symbols",
+        );
         return;
     }
 
@@ -134,6 +149,42 @@ where
 
 fn warn_native_disabled(reason: &str) {
     println!("cargo:warning=OpenCL native backend disabled: {reason}");
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            matches!(
+                value.as_str(),
+                "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn windows_cuda_toolkit_present() -> bool {
+    for var in ["CUDA_PATH", "CUDA_HOME", "CUDA_ROOT", "CUDAToolkit_ROOT"] {
+        if let Some(root) = std::env::var_os(var)
+            && cuda_root_has_nvcc(PathBuf::from(root))
+        {
+            return true;
+        }
+    }
+
+    let cuda_root = PathBuf::from(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA");
+    if !cuda_root.is_dir() {
+        return false;
+    }
+    std::fs::read_dir(cuda_root)
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.filter_map(Result::ok))
+        .map(|entry| entry.path())
+        .any(cuda_root_has_nvcc)
+}
+
+fn cuda_root_has_nvcc(root: PathBuf) -> bool {
+    root.join("bin").join("nvcc.exe").is_file()
 }
 
 fn prepare_windows_build_environment() {

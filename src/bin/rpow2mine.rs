@@ -5,6 +5,8 @@ use std::time::Instant;
 
 use crossterm as _;
 use hdd_autopilot as _;
+#[cfg(not(target_os = "macos"))]
+use iana_time_zone as _;
 use mining::rpow2::{
     Rpow2Backend, Rpow2Client, Rpow2Job, Rpow2MineConfig, mine_rpow2, rpow2_meets_difficulty,
 };
