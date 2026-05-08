@@ -48,6 +48,9 @@ pub struct mining_cuda_mine_result {
 #[repr(C)]
 pub struct mining_cuda_rpow2_solver_config {
     pub batch_size: u64,
+    pub threads_per_block: u32,
+    pub nonces_per_thread: u32,
+    pub max_blocks: u32,
 }
 
 #[repr(C)]
@@ -63,6 +66,17 @@ pub struct mining_cuda_rpow2_mine_result {
     pub nonce: u64,
     pub attempts: i64,
     pub digest_hex: [u8; 65],
+}
+
+#[repr(C)]
+pub struct mining_cuda_rpow2_benchmark_result {
+    pub attempts: u64,
+    pub batches: u64,
+    pub elapsed_ms: f64,
+    pub kernel_ms: f64,
+    pub empty_launch_us: f64,
+    pub kernel_hashrate: f64,
+    pub effective_hashrate: f64,
 }
 
 #[repr(C)]
@@ -138,6 +152,9 @@ pub struct CudaMineResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rpow2CudaSolverConfig {
     pub batch_size: u64,
+    pub threads_per_block: u32,
+    pub nonces_per_thread: u32,
+    pub max_blocks: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,6 +169,17 @@ pub struct Rpow2CudaMineResult {
     pub nonce: u64,
     pub attempts: i64,
     pub digest_hex: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rpow2CudaBenchmarkResult {
+    pub attempts: u64,
+    pub batches: u64,
+    pub elapsed: Duration,
+    pub kernel_elapsed: Duration,
+    pub empty_launch: Duration,
+    pub kernel_hashrate: f64,
+    pub effective_hashrate: f64,
 }
 
 pub struct CudaMiningSession {
@@ -219,6 +247,13 @@ unsafe extern "C" {
         result: *mut mining_cuda_rpow2_mine_result,
     ) -> bool;
     fn mining_cuda_rpow2_session_destroy(session: *mut mining_cuda_rpow2_session);
+    fn mining_cuda_rpow2_benchmark(
+        device_index: usize,
+        job: *const mining_cuda_rpow2_job,
+        config: *const mining_cuda_rpow2_solver_config,
+        duration_ms: u32,
+        result: *mut mining_cuda_rpow2_benchmark_result,
+    ) -> bool;
     fn mining_argon2id_hash_raw(
         password_ptr: *const u8,
         password_len: usize,
@@ -462,6 +497,9 @@ pub fn rpow2_mine_batch(
         };
         let raw_config = mining_cuda_rpow2_solver_config {
             batch_size: config.batch_size,
+            threads_per_block: config.threads_per_block,
+            nonces_per_thread: config.nonces_per_thread,
+            max_blocks: config.max_blocks,
         };
         let mut raw_result = mining_cuda_rpow2_mine_result {
             found: false,
@@ -513,6 +551,9 @@ pub fn rpow2_create_session(
         };
         let raw_config = mining_cuda_rpow2_solver_config {
             batch_size: config.batch_size,
+            threads_per_block: config.threads_per_block,
+            nonces_per_thread: config.nonces_per_thread,
+            max_blocks: config.max_blocks,
         };
         let raw =
             mining_cuda_rpow2_session_create(device_index, &raw_job, &raw_config, start_nonce);
@@ -521,6 +562,63 @@ pub fn rpow2_create_session(
         } else {
             Ok(Rpow2CudaMiningSession { raw })
         }
+    }
+}
+
+pub fn rpow2_benchmark(
+    device_index: usize,
+    job: &Rpow2CudaJob<'_>,
+    config: Rpow2CudaSolverConfig,
+    duration: Duration,
+) -> Result<Rpow2CudaBenchmarkResult, String> {
+    #[cfg(not(mining_cuda_native_enabled))]
+    {
+        let _ = (device_index, job, config, duration);
+        Err("CUDA backend is not enabled on this platform.".to_string())
+    }
+    #[cfg(mining_cuda_native_enabled)]
+    unsafe {
+        let raw_job = mining_cuda_rpow2_job {
+            nonce_prefix_ptr: job.nonce_prefix.as_ptr(),
+            nonce_prefix_len: job.nonce_prefix.len(),
+            difficulty_bits: job.difficulty_bits,
+        };
+        let raw_config = mining_cuda_rpow2_solver_config {
+            batch_size: config.batch_size,
+            threads_per_block: config.threads_per_block,
+            nonces_per_thread: config.nonces_per_thread,
+            max_blocks: config.max_blocks,
+        };
+        let mut raw_result = mining_cuda_rpow2_benchmark_result {
+            attempts: 0,
+            batches: 0,
+            elapsed_ms: 0.0,
+            kernel_ms: 0.0,
+            empty_launch_us: 0.0,
+            kernel_hashrate: 0.0,
+            effective_hashrate: 0.0,
+        };
+        let duration_ms = duration.as_millis().min(u128::from(u32::MAX)) as u32;
+        if !mining_cuda_rpow2_benchmark(
+            device_index,
+            &raw_job,
+            &raw_config,
+            duration_ms.max(1),
+            &mut raw_result,
+        ) {
+            return Err(last_error_message());
+        }
+        Ok(Rpow2CudaBenchmarkResult {
+            attempts: raw_result.attempts,
+            batches: raw_result.batches,
+            elapsed: Duration::from_secs_f64((raw_result.elapsed_ms / 1000.0).max(0.0)),
+            kernel_elapsed: Duration::from_secs_f64((raw_result.kernel_ms / 1000.0).max(0.0)),
+            empty_launch: Duration::from_secs_f64(
+                (raw_result.empty_launch_us / 1_000_000.0).max(0.0),
+            ),
+            kernel_hashrate: raw_result.kernel_hashrate,
+            effective_hashrate: raw_result.effective_hashrate,
+        })
     }
 }
 

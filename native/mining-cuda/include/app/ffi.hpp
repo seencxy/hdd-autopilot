@@ -32,6 +32,9 @@ struct mining_cuda_rpow2_session;
 
 struct mining_cuda_rpow2_solver_config {
     std::uint64_t batch_size;
+    std::uint32_t threads_per_block;
+    std::uint32_t nonces_per_thread;
+    std::uint32_t max_blocks;
 };
 
 struct mining_cuda_rpow2_job {
@@ -45,6 +48,16 @@ struct mining_cuda_rpow2_mine_result {
     std::uint64_t nonce;
     std::int64_t attempts;
     char digest_hex[65];
+};
+
+struct mining_cuda_rpow2_benchmark_result {
+    std::uint64_t attempts;
+    std::uint64_t batches;
+    double elapsed_ms;
+    double kernel_ms;
+    double empty_launch_us;
+    double kernel_hashrate;
+    double effective_hashrate;
 };
 
 struct mining_cuda_benchmark_result {
@@ -118,6 +131,12 @@ MINING_CUDA_EXPORT bool mining_cuda_rpow2_session_mine_next_batch(
     mining_cuda_rpow2_session* session,
     mining_cuda_rpow2_mine_result* result);
 MINING_CUDA_EXPORT void mining_cuda_rpow2_session_destroy(mining_cuda_rpow2_session* session);
+MINING_CUDA_EXPORT bool mining_cuda_rpow2_benchmark(
+    std::size_t device_index,
+    const mining_cuda_rpow2_job* job,
+    const mining_cuda_rpow2_solver_config* config,
+    std::uint32_t duration_ms,
+    mining_cuda_rpow2_benchmark_result* result);
 MINING_CUDA_EXPORT bool mining_argon2id_hash_raw(
     const std::uint8_t* password_ptr,
     std::size_t password_len,

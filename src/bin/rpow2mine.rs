@@ -137,6 +137,15 @@ fn solve_job(
         prefer_gpu: !args.cpu_only,
         metal_device_index: args.gpu_device_index.unwrap_or(0),
         metal_batch_size: args.gpu_batch_size.unwrap_or_else(default_gpu_batch_size),
+        cuda_threads_per_block: args
+            .gpu_threads_per_block
+            .unwrap_or(mining::rpow2::DEFAULT_CUDA_THREADS_PER_BLOCK),
+        cuda_nonces_per_thread: args
+            .gpu_nonces_per_thread
+            .unwrap_or(mining::rpow2::DEFAULT_CUDA_NONCES_PER_THREAD),
+        cuda_max_blocks: args
+            .gpu_max_blocks
+            .unwrap_or(mining::rpow2::DEFAULT_CUDA_MAX_BLOCKS),
         cpu_threads: args.cpu_threads.unwrap_or_else(|| {
             std::thread::available_parallelism()
                 .map(usize::from)
@@ -146,9 +155,12 @@ fn solve_job(
     };
     if !args.cpu_only {
         println!(
-            "gpu_device={} gpu_batch_size={}",
+            "gpu_device={} gpu_batch_size={} threads_per_block={} nonces_per_thread={} max_blocks={}",
             config.metal_device_index,
-            gpu_batch_label(config.metal_batch_size)
+            gpu_batch_label(config.metal_batch_size),
+            config.cuda_threads_per_block,
+            config.cuda_nonces_per_thread,
+            gpu_max_blocks_label(config.cuda_max_blocks)
         );
     }
     let result = mine_rpow2(job, config, &cancel)?;
@@ -270,7 +282,7 @@ fn mint_with_recovery(
 fn default_gpu_batch_size() -> u64 {
     #[cfg(target_os = "windows")]
     {
-        mining::rpow2::FULL_CUDA_BATCH_SIZE
+        mining::rpow2::DEFAULT_CUDA_BATCH_SIZE
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -305,6 +317,14 @@ fn gpu_batch_label(batch_size: u64) -> String {
         "auto".to_string()
     } else {
         batch_size.to_string()
+    }
+}
+
+fn gpu_max_blocks_label(max_blocks: u32) -> String {
+    if max_blocks == 0 {
+        "auto".to_string()
+    } else {
+        max_blocks.to_string()
     }
 }
 
@@ -400,6 +420,9 @@ struct Args {
     cpu_threads: Option<usize>,
     gpu_batch_size: Option<u64>,
     gpu_device_index: Option<usize>,
+    gpu_threads_per_block: Option<u32>,
+    gpu_nonces_per_thread: Option<u32>,
+    gpu_max_blocks: Option<u32>,
     challenge_prefetch: Option<usize>,
     mint_workers: Option<usize>,
 }
@@ -438,6 +461,21 @@ impl Args {
                     args.gpu_device_index =
                         Some(next_value(&raw, index, raw[index - 1].as_str())?.parse()?);
                 }
+                "--gpu-threads-per-block" | "--cuda-threads-per-block" => {
+                    index += 1;
+                    args.gpu_threads_per_block =
+                        Some(next_value(&raw, index, raw[index - 1].as_str())?.parse()?);
+                }
+                "--gpu-nonces-per-thread" | "--cuda-nonces-per-thread" => {
+                    index += 1;
+                    args.gpu_nonces_per_thread =
+                        Some(next_value(&raw, index, raw[index - 1].as_str())?.parse()?);
+                }
+                "--gpu-max-blocks" | "--cuda-max-blocks" => {
+                    index += 1;
+                    args.gpu_max_blocks =
+                        Some(next_value(&raw, index, raw[index - 1].as_str())?.parse()?);
+                }
                 "--challenge-prefetch" => {
                     index += 1;
                     args.challenge_prefetch =
@@ -472,15 +510,16 @@ fn next_value<'a>(
 fn print_usage() {
     println!(
         "Usage:
-  rpow2mine --cookie '<cookie-header>' [--loop] [--cpu-only] [--gpu-device <index>] [--gpu-batch-size <hashes>] [--challenge-prefetch <n>] [--mint-workers <n>]
+  rpow2mine --cookie '<cookie-header>' [--loop] [--cpu-only] [--gpu-device <index>] [--gpu-batch-size <hashes>] [--gpu-threads-per-block <n>] [--gpu-nonces-per-thread <n>] [--gpu-max-blocks <n>] [--challenge-prefetch <n>] [--mint-workers <n>]
   rpow2mine --prefix <hex> --difficulty <bits> [--cpu-only] [--gpu-device <index>] [--gpu-batch-size <hashes>]
 
 Environment:
   RPOW2_COOKIE   Cookie header copied from an authenticated rpow2.com browser session
 
 Notes:
-  Windows GPU mining uses CUDA and defaults to a full-size 2147483648 hash batch
+  Windows GPU mining uses CUDA and defaults to batch 268435456, 256 threads/block, 4 nonces/thread
   --gpu-batch-size 0 enables automatic GPU batch tuning
+  --gpu-max-blocks 0 uses an SM-based automatic grid size
   --loop defaults to challenge prefetch 8 and mint workers 2 on Windows
   macOS GPU mining uses Metal"
     );

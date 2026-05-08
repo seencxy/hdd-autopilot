@@ -56,6 +56,22 @@ struct Rpow2CudaBatchResult {
     std::array<std::uint8_t, 32> digest{};
 };
 
+struct Rpow2CudaProfiledBatchResult {
+    Rpow2CudaBatchResult result;
+    double wall_milliseconds = 0.0;
+    double kernel_milliseconds = 0.0;
+};
+
+struct Rpow2CudaBenchmarkResult {
+    std::uint64_t attempts = 0;
+    std::uint64_t batches = 0;
+    double elapsed_milliseconds = 0.0;
+    double kernel_milliseconds = 0.0;
+    double empty_launch_microseconds = 0.0;
+    double kernel_hashrate = 0.0;
+    double effective_hashrate = 0.0;
+};
+
 class Rpow2CudaSession {
 public:
     Rpow2CudaSession(
@@ -64,7 +80,10 @@ public:
         std::size_t nonce_prefix_len,
         std::uint32_t difficulty_bits,
         std::uint64_t batch_size,
-        std::uint64_t start_nonce);
+        std::uint64_t start_nonce,
+        std::uint32_t threads_per_block,
+        std::uint32_t nonces_per_thread,
+        std::uint32_t max_blocks);
     ~Rpow2CudaSession();
 
     Rpow2CudaSession(const Rpow2CudaSession&) = delete;
@@ -73,14 +92,20 @@ public:
     Rpow2CudaSession& operator=(Rpow2CudaSession&&) = delete;
 
     Rpow2CudaBatchResult mine_next_batch();
+    Rpow2CudaProfiledBatchResult mine_next_batch_profiled();
 
 private:
     int device_index_ = 0;
-    void* device_template_ = nullptr;
     void* device_result_ = nullptr;
+    std::array<std::uint32_t, 8> initial_state_{};
+    std::array<std::uint32_t, 32> template_words_{};
     std::uint32_t prefix_len_ = 0;
+    std::uint32_t nonce_offset_ = 0;
     std::uint32_t difficulty_bits_ = 0;
     std::uint32_t block_count_ = 0;
+    std::uint32_t threads_per_block_ = 0;
+    std::uint32_t nonces_per_thread_ = 0;
+    std::uint32_t max_blocks_ = 0;
     std::uint64_t batch_size_ = 0;
     std::uint64_t next_nonce_ = 0;
     std::uint64_t attempts_ = 0;
@@ -127,5 +152,27 @@ Rpow2CudaBatchResult mine_rpow2_cuda_batch(
     std::uint32_t difficulty_bits,
     std::uint64_t batch_size,
     std::uint64_t start_nonce);
+
+Rpow2CudaBatchResult mine_rpow2_cuda_batch(
+    std::size_t device_index,
+    const std::uint8_t* nonce_prefix,
+    std::size_t nonce_prefix_len,
+    std::uint32_t difficulty_bits,
+    std::uint64_t batch_size,
+    std::uint64_t start_nonce,
+    std::uint32_t threads_per_block,
+    std::uint32_t nonces_per_thread,
+    std::uint32_t max_blocks);
+
+Rpow2CudaBenchmarkResult benchmark_rpow2_cuda(
+    std::size_t device_index,
+    const std::uint8_t* nonce_prefix,
+    std::size_t nonce_prefix_len,
+    std::uint32_t difficulty_bits,
+    std::uint64_t batch_size,
+    std::uint32_t duration_ms,
+    std::uint32_t threads_per_block,
+    std::uint32_t nonces_per_thread,
+    std::uint32_t max_blocks);
 
 } // namespace app

@@ -185,11 +185,14 @@ struct mining_cuda_rpow2_session {
         : session(device_index,
                   job.nonce_prefix_ptr,
                   job.nonce_prefix_len,
-                  job.difficulty_bits,
-                  config.batch_size,
-                  start_nonce) {
-    }
-};
+	                  job.difficulty_bits,
+	                  config.batch_size,
+	                  start_nonce,
+	                  config.threads_per_block,
+	                  config.nonces_per_thread,
+	                  config.max_blocks) {
+	    }
+	};
 
 bool mining_cuda_is_available() {
     try {
@@ -373,15 +376,18 @@ bool mining_cuda_rpow2_mine_batch(
     }
     try {
         clear_last_error();
-        const auto mined = app::mine_rpow2_cuda_batch(
-            device_index,
-            job->nonce_prefix_ptr,
-            job->nonce_prefix_len,
-            job->difficulty_bits,
-            config->batch_size,
-            start_nonce);
-        fill_rpow2_mine_result(mined, result);
-        return true;
+	        const auto mined = app::mine_rpow2_cuda_batch(
+	            device_index,
+	            job->nonce_prefix_ptr,
+	            job->nonce_prefix_len,
+	            job->difficulty_bits,
+	            config->batch_size,
+	            start_nonce,
+	            config->threads_per_block,
+	            config->nonces_per_thread,
+	            config->max_blocks);
+	        fill_rpow2_mine_result(mined, result);
+	        return true;
     } catch (const std::exception& error) {
         set_last_error(error);
         return false;
@@ -424,11 +430,47 @@ bool mining_cuda_rpow2_session_mine_next_batch(
     }
 }
 
-void mining_cuda_rpow2_session_destroy(mining_cuda_rpow2_session* session) {
-    delete session;
-}
+	void mining_cuda_rpow2_session_destroy(mining_cuda_rpow2_session* session) {
+	    delete session;
+	}
 
-bool mining_argon2id_hash_raw(
+	bool mining_cuda_rpow2_benchmark(
+	    std::size_t device_index,
+	    const mining_cuda_rpow2_job* job,
+	    const mining_cuda_rpow2_solver_config* config,
+	    std::uint32_t duration_ms,
+	    mining_cuda_rpow2_benchmark_result* result) {
+	    if (job == nullptr || config == nullptr || result == nullptr) {
+	        g_last_error = "rpow2 benchmark parameter is null";
+	        return false;
+	    }
+	    try {
+	        clear_last_error();
+	        const auto benchmark = app::benchmark_rpow2_cuda(
+	            device_index,
+	            job->nonce_prefix_ptr,
+	            job->nonce_prefix_len,
+	            job->difficulty_bits,
+	            config->batch_size,
+	            duration_ms,
+	            config->threads_per_block,
+	            config->nonces_per_thread,
+	            config->max_blocks);
+	        result->attempts = benchmark.attempts;
+	        result->batches = benchmark.batches;
+	        result->elapsed_ms = benchmark.elapsed_milliseconds;
+	        result->kernel_ms = benchmark.kernel_milliseconds;
+	        result->empty_launch_us = benchmark.empty_launch_microseconds;
+	        result->kernel_hashrate = benchmark.kernel_hashrate;
+	        result->effective_hashrate = benchmark.effective_hashrate;
+	        return true;
+	    } catch (const std::exception& error) {
+	        set_last_error(error);
+	        return false;
+	    }
+	}
+
+	bool mining_argon2id_hash_raw(
     const std::uint8_t* password_ptr,
     std::size_t password_len,
     const std::uint8_t* salt_ptr,

@@ -14,9 +14,13 @@ use crate::{DEFAULT_USER_AGENT, MiningError};
 const CPU_ATTEMPT_FLUSH_INTERVAL: i64 = 4096;
 const AUTO_GPU_BATCH_SIZE: u64 = 0;
 pub const FULL_CUDA_BATCH_SIZE: u64 = 1 << 31;
-const FALLBACK_CUDA_BATCH_SIZE: u64 = FULL_CUDA_BATCH_SIZE;
+pub const DEFAULT_CUDA_BATCH_SIZE: u64 = 1 << 28;
+pub const DEFAULT_CUDA_THREADS_PER_BLOCK: u32 = 256;
+pub const DEFAULT_CUDA_NONCES_PER_THREAD: u32 = 4;
+pub const DEFAULT_CUDA_MAX_BLOCKS: u32 = 0;
+const FALLBACK_CUDA_BATCH_SIZE: u64 = DEFAULT_CUDA_BATCH_SIZE;
 const FALLBACK_METAL_BATCH_SIZE: u64 = 1 << 22;
-const CUDA_AUTO_TUNE_BATCH_SIZES: [u64; 4] = [1 << 26, 1 << 28, 1 << 30, FULL_CUDA_BATCH_SIZE];
+const CUDA_AUTO_TUNE_BATCH_SIZES: [u64; 4] = [1 << 24, 1 << 26, DEFAULT_CUDA_BATCH_SIZE, 1 << 30];
 const METAL_AUTO_TUNE_BATCH_SIZES: [u64; 4] = [1 << 18, 1 << 20, 1 << 22, 1 << 24];
 const RPOW2_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -49,6 +53,9 @@ pub struct Rpow2MineConfig {
     pub prefer_gpu: bool,
     pub metal_device_index: usize,
     pub metal_batch_size: u64,
+    pub cuda_threads_per_block: u32,
+    pub cuda_nonces_per_thread: u32,
+    pub cuda_max_blocks: u32,
 }
 
 impl Default for Rpow2MineConfig {
@@ -62,8 +69,47 @@ impl Default for Rpow2MineConfig {
             prefer_gpu: true,
             metal_device_index: 0,
             metal_batch_size: AUTO_GPU_BATCH_SIZE,
+            cuda_threads_per_block: DEFAULT_CUDA_THREADS_PER_BLOCK,
+            cuda_nonces_per_thread: DEFAULT_CUDA_NONCES_PER_THREAD,
+            cuda_max_blocks: DEFAULT_CUDA_MAX_BLOCKS,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rpow2CudaBenchmarkConfig {
+    pub device_index: usize,
+    pub batch_size: u64,
+    pub duration: Duration,
+    pub threads_per_block: u32,
+    pub nonces_per_thread: u32,
+    pub max_blocks: u32,
+}
+
+impl Default for Rpow2CudaBenchmarkConfig {
+    fn default() -> Self {
+        Self {
+            device_index: 0,
+            batch_size: DEFAULT_CUDA_BATCH_SIZE,
+            duration: Duration::from_secs(30),
+            threads_per_block: DEFAULT_CUDA_THREADS_PER_BLOCK,
+            nonces_per_thread: DEFAULT_CUDA_NONCES_PER_THREAD,
+            max_blocks: DEFAULT_CUDA_MAX_BLOCKS,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rpow2CudaBenchmarkReport {
+    pub attempts: u64,
+    pub batches: u64,
+    pub elapsed: Duration,
+    pub kernel_elapsed: Duration,
+    pub empty_launch: Duration,
+    pub kernel_hashrate: f64,
+    pub effective_hashrate: f64,
+    pub host_device_overhead: Duration,
+    pub network_idle_ratio: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -277,6 +323,40 @@ pub fn mine_rpow2(
     mine_rpow2_cpu(job, config, cancel)
 }
 
+pub fn benchmark_rpow2_cuda(
+    job: &Rpow2Job,
+    config: Rpow2CudaBenchmarkConfig,
+) -> Result<Rpow2CudaBenchmarkReport, MiningError> {
+    let raw_job = mining_cuda_sys::Rpow2CudaJob {
+        nonce_prefix: &job.nonce_prefix,
+        difficulty_bits: job.difficulty_bits,
+    };
+    let raw = mining_cuda_sys::rpow2_benchmark(
+        config.device_index,
+        &raw_job,
+        mining_cuda_sys::Rpow2CudaSolverConfig {
+            batch_size: config.batch_size.max(1),
+            threads_per_block: config.threads_per_block,
+            nonces_per_thread: config.nonces_per_thread,
+            max_blocks: config.max_blocks,
+        },
+        config.duration,
+    )
+    .map_err(MiningError::Message)?;
+    let host_device_overhead = raw.elapsed.saturating_sub(raw.kernel_elapsed);
+    Ok(Rpow2CudaBenchmarkReport {
+        attempts: raw.attempts,
+        batches: raw.batches,
+        elapsed: raw.elapsed,
+        kernel_elapsed: raw.kernel_elapsed,
+        empty_launch: raw.empty_launch,
+        kernel_hashrate: raw.kernel_hashrate,
+        effective_hashrate: raw.effective_hashrate,
+        host_device_overhead,
+        network_idle_ratio: 0.0,
+    })
+}
+
 pub fn mine_rpow2_cpu(
     job: &Rpow2Job,
     config: Rpow2MineConfig,
@@ -482,6 +562,9 @@ fn mine_rpow2_cuda(
                 &raw_job,
                 mining_cuda_sys::Rpow2CudaSolverConfig {
                     batch_size: current_batch_size,
+                    threads_per_block: config.cuda_threads_per_block,
+                    nonces_per_thread: config.cuda_nonces_per_thread,
+                    max_blocks: config.cuda_max_blocks,
                 },
                 start_nonce,
             )
@@ -515,7 +598,12 @@ fn mine_rpow2_cuda(
         let mut session = mining_cuda_sys::rpow2_create_session(
             config.metal_device_index,
             &raw_job,
-            mining_cuda_sys::Rpow2CudaSolverConfig { batch_size },
+            mining_cuda_sys::Rpow2CudaSolverConfig {
+                batch_size,
+                threads_per_block: config.cuda_threads_per_block,
+                nonces_per_thread: config.cuda_nonces_per_thread,
+                max_blocks: config.cuda_max_blocks,
+            },
             start_nonce,
         )
         .map_err(MiningError::Message)?;
@@ -545,6 +633,9 @@ fn mine_rpow2_cuda(
             &raw_job,
             mining_cuda_sys::Rpow2CudaSolverConfig {
                 batch_size: current_batch,
+                threads_per_block: config.cuda_threads_per_block,
+                nonces_per_thread: config.cuda_nonces_per_thread,
+                max_blocks: config.cuda_max_blocks,
             },
             start_nonce,
         )
