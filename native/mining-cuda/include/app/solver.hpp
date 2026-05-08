@@ -83,7 +83,8 @@ public:
         std::uint64_t start_nonce,
         std::uint32_t threads_per_block,
         std::uint32_t nonces_per_thread,
-        std::uint32_t max_blocks);
+        std::uint32_t max_blocks,
+        bool early_exit);
     ~Rpow2CudaSession();
 
     Rpow2CudaSession(const Rpow2CudaSession&) = delete;
@@ -106,6 +107,7 @@ private:
     std::uint32_t threads_per_block_ = 0;
     std::uint32_t nonces_per_thread_ = 0;
     std::uint32_t max_blocks_ = 0;
+    bool early_exit_ = true;
     std::uint64_t batch_size_ = 0;
     std::uint64_t next_nonce_ = 0;
     std::uint64_t attempts_ = 0;
@@ -162,7 +164,8 @@ Rpow2CudaBatchResult mine_rpow2_cuda_batch(
     std::uint64_t start_nonce,
     std::uint32_t threads_per_block,
     std::uint32_t nonces_per_thread,
-    std::uint32_t max_blocks);
+    std::uint32_t max_blocks,
+    bool early_exit);
 
 Rpow2CudaBenchmarkResult benchmark_rpow2_cuda(
     std::size_t device_index,
@@ -173,6 +176,7 @@ Rpow2CudaBenchmarkResult benchmark_rpow2_cuda(
     std::uint32_t duration_ms,
     std::uint32_t threads_per_block,
     std::uint32_t nonces_per_thread,
-    std::uint32_t max_blocks);
+    std::uint32_t max_blocks,
+    bool early_exit);
 
 } // namespace app

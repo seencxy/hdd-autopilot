@@ -7,8 +7,9 @@ use hdd_autopilot as _;
 #[cfg(not(target_os = "macos"))]
 use iana_time_zone as _;
 use mining::rpow2::{
-    DEFAULT_CUDA_BATCH_SIZE, DEFAULT_CUDA_MAX_BLOCKS, DEFAULT_CUDA_NONCES_PER_THREAD,
-    DEFAULT_CUDA_THREADS_PER_BLOCK, Rpow2CudaBenchmarkConfig, Rpow2Job, benchmark_rpow2_cuda,
+    DEFAULT_CUDA_BATCH_SIZE, DEFAULT_CUDA_EARLY_EXIT, DEFAULT_CUDA_MAX_BLOCKS,
+    DEFAULT_CUDA_NONCES_PER_THREAD, DEFAULT_CUDA_THREADS_PER_BLOCK, Rpow2CudaBenchmarkConfig,
+    Rpow2Job, benchmark_rpow2_cuda,
 };
 use rand as _;
 use reqwest as _;
@@ -49,6 +50,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             .gpu_nonces_per_thread
             .unwrap_or(DEFAULT_CUDA_NONCES_PER_THREAD),
         max_blocks: args.gpu_max_blocks.unwrap_or(DEFAULT_CUDA_MAX_BLOCKS),
+        early_exit: !args.gpu_no_early_exit,
     };
 
     println!("prefix={prefix}");
@@ -58,6 +60,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     println!("threads_per_block={}", config.threads_per_block);
     println!("nonces_per_thread={}", config.nonces_per_thread);
     println!("max_blocks={}", gpu_max_blocks_label(config.max_blocks));
+    println!("early_exit={}", config.early_exit);
     println!("duration_seconds={:.3}", config.duration.as_secs_f64());
 
     let report = benchmark_rpow2_cuda(&job, config)?;
@@ -107,6 +110,7 @@ struct Args {
     gpu_threads_per_block: Option<u32>,
     gpu_nonces_per_thread: Option<u32>,
     gpu_max_blocks: Option<u32>,
+    gpu_no_early_exit: bool,
     help: bool,
 }
 
@@ -153,6 +157,9 @@ impl Args {
                     args.gpu_max_blocks =
                         Some(next_value(&raw, index, raw[index - 1].as_str())?.parse()?);
                 }
+                "--gpu-no-early-exit" | "--cuda-no-early-exit" => {
+                    args.gpu_no_early_exit = true;
+                }
                 "-h" | "--help" => args.help = true,
                 other => return Err(format!("unknown argument: {other}").into()),
             }
@@ -173,7 +180,7 @@ fn print_usage() {
         "Usage:
   rpow2-bench [--gpu-device <index>] [--seconds <n>] [--prefix <hex>] [--difficulty <bits>]
               [--gpu-batch-size <hashes>] [--gpu-threads-per-block <n>]
-              [--gpu-nonces-per-thread <n>] [--gpu-max-blocks <n>]
+              [--gpu-nonces-per-thread <n>] [--gpu-max-blocks <n>] [--gpu-no-early-exit]
 
 Defaults:
   prefix                  {DEFAULT_PREFIX_HEX}
@@ -182,7 +189,8 @@ Defaults:
   gpu-batch-size          {DEFAULT_CUDA_BATCH_SIZE}
   gpu-threads-per-block   {DEFAULT_CUDA_THREADS_PER_BLOCK}
   gpu-nonces-per-thread   {DEFAULT_CUDA_NONCES_PER_THREAD}
-  gpu-max-blocks          auto"
+  gpu-max-blocks          auto
+  gpu-early-exit          {DEFAULT_CUDA_EARLY_EXIT}"
     );
 }
 

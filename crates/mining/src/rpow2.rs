@@ -18,6 +18,7 @@ pub const DEFAULT_CUDA_BATCH_SIZE: u64 = 1 << 28;
 pub const DEFAULT_CUDA_THREADS_PER_BLOCK: u32 = 512;
 pub const DEFAULT_CUDA_NONCES_PER_THREAD: u32 = 4;
 pub const DEFAULT_CUDA_MAX_BLOCKS: u32 = 0;
+pub const DEFAULT_CUDA_EARLY_EXIT: bool = true;
 const FALLBACK_CUDA_BATCH_SIZE: u64 = DEFAULT_CUDA_BATCH_SIZE;
 #[cfg(target_os = "macos")]
 const FALLBACK_METAL_BATCH_SIZE: u64 = 1 << 22;
@@ -58,6 +59,7 @@ pub struct Rpow2MineConfig {
     pub cuda_threads_per_block: u32,
     pub cuda_nonces_per_thread: u32,
     pub cuda_max_blocks: u32,
+    pub cuda_early_exit: bool,
 }
 
 impl Default for Rpow2MineConfig {
@@ -74,6 +76,7 @@ impl Default for Rpow2MineConfig {
             cuda_threads_per_block: DEFAULT_CUDA_THREADS_PER_BLOCK,
             cuda_nonces_per_thread: DEFAULT_CUDA_NONCES_PER_THREAD,
             cuda_max_blocks: DEFAULT_CUDA_MAX_BLOCKS,
+            cuda_early_exit: DEFAULT_CUDA_EARLY_EXIT,
         }
     }
 }
@@ -86,6 +89,7 @@ pub struct Rpow2CudaBenchmarkConfig {
     pub threads_per_block: u32,
     pub nonces_per_thread: u32,
     pub max_blocks: u32,
+    pub early_exit: bool,
 }
 
 impl Default for Rpow2CudaBenchmarkConfig {
@@ -97,6 +101,7 @@ impl Default for Rpow2CudaBenchmarkConfig {
             threads_per_block: DEFAULT_CUDA_THREADS_PER_BLOCK,
             nonces_per_thread: DEFAULT_CUDA_NONCES_PER_THREAD,
             max_blocks: DEFAULT_CUDA_MAX_BLOCKS,
+            early_exit: DEFAULT_CUDA_EARLY_EXIT,
         }
     }
 }
@@ -341,6 +346,7 @@ pub fn benchmark_rpow2_cuda(
             threads_per_block: config.threads_per_block,
             nonces_per_thread: config.nonces_per_thread,
             max_blocks: config.max_blocks,
+            early_exit: config.early_exit,
         },
         config.duration,
     )
@@ -567,6 +573,7 @@ fn mine_rpow2_cuda(
                     threads_per_block: config.cuda_threads_per_block,
                     nonces_per_thread: config.cuda_nonces_per_thread,
                     max_blocks: config.cuda_max_blocks,
+                    early_exit: config.cuda_early_exit,
                 },
                 start_nonce,
             )
@@ -605,6 +612,7 @@ fn mine_rpow2_cuda(
                 threads_per_block: config.cuda_threads_per_block,
                 nonces_per_thread: config.cuda_nonces_per_thread,
                 max_blocks: config.cuda_max_blocks,
+                early_exit: config.cuda_early_exit,
             },
             start_nonce,
         )
@@ -638,6 +646,7 @@ fn mine_rpow2_cuda(
                 threads_per_block: config.cuda_threads_per_block,
                 nonces_per_thread: config.cuda_nonces_per_thread,
                 max_blocks: config.cuda_max_blocks,
+                early_exit: config.cuda_early_exit,
             },
             start_nonce,
         )

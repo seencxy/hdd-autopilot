@@ -190,7 +190,8 @@ struct mining_cuda_rpow2_session {
 	                  start_nonce,
 	                  config.threads_per_block,
 	                  config.nonces_per_thread,
-	                  config.max_blocks) {
+	                  config.max_blocks,
+	                  config.early_exit) {
 	    }
 	};
 
@@ -385,7 +386,8 @@ bool mining_cuda_rpow2_mine_batch(
 	            start_nonce,
 	            config->threads_per_block,
 	            config->nonces_per_thread,
-	            config->max_blocks);
+	            config->max_blocks,
+	            config->early_exit);
 	        fill_rpow2_mine_result(mined, result);
 	        return true;
     } catch (const std::exception& error) {
@@ -455,7 +457,8 @@ bool mining_cuda_rpow2_session_mine_next_batch(
 	            duration_ms,
 	            config->threads_per_block,
 	            config->nonces_per_thread,
-	            config->max_blocks);
+	            config->max_blocks,
+	            config->early_exit);
 	        result->attempts = benchmark.attempts;
 	        result->batches = benchmark.batches;
 	        result->elapsed_ms = benchmark.elapsed_milliseconds;

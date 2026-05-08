@@ -146,6 +146,7 @@ fn solve_job(
         cuda_max_blocks: args
             .gpu_max_blocks
             .unwrap_or(mining::rpow2::DEFAULT_CUDA_MAX_BLOCKS),
+        cuda_early_exit: !args.gpu_no_early_exit,
         cpu_threads: args.cpu_threads.unwrap_or_else(|| {
             std::thread::available_parallelism()
                 .map(usize::from)
@@ -155,12 +156,13 @@ fn solve_job(
     };
     if !args.cpu_only {
         println!(
-            "gpu_device={} gpu_batch_size={} threads_per_block={} nonces_per_thread={} max_blocks={}",
+            "gpu_device={} gpu_batch_size={} threads_per_block={} nonces_per_thread={} max_blocks={} early_exit={}",
             config.metal_device_index,
             gpu_batch_label(config.metal_batch_size),
             config.cuda_threads_per_block,
             config.cuda_nonces_per_thread,
-            gpu_max_blocks_label(config.cuda_max_blocks)
+            gpu_max_blocks_label(config.cuda_max_blocks),
+            config.cuda_early_exit
         );
     }
     let result = mine_rpow2(job, config, &cancel)?;
@@ -423,6 +425,7 @@ struct Args {
     gpu_threads_per_block: Option<u32>,
     gpu_nonces_per_thread: Option<u32>,
     gpu_max_blocks: Option<u32>,
+    gpu_no_early_exit: bool,
     challenge_prefetch: Option<usize>,
     mint_workers: Option<usize>,
 }
@@ -476,6 +479,9 @@ impl Args {
                     args.gpu_max_blocks =
                         Some(next_value(&raw, index, raw[index - 1].as_str())?.parse()?);
                 }
+                "--gpu-no-early-exit" | "--cuda-no-early-exit" => {
+                    args.gpu_no_early_exit = true;
+                }
                 "--challenge-prefetch" => {
                     index += 1;
                     args.challenge_prefetch =
@@ -510,7 +516,7 @@ fn next_value<'a>(
 fn print_usage() {
     println!(
         "Usage:
-  rpow2mine --cookie '<cookie-header>' [--loop] [--cpu-only] [--gpu-device <index>] [--gpu-batch-size <hashes>] [--gpu-threads-per-block <n>] [--gpu-nonces-per-thread <n>] [--gpu-max-blocks <n>] [--challenge-prefetch <n>] [--mint-workers <n>]
+  rpow2mine --cookie '<cookie-header>' [--loop] [--cpu-only] [--gpu-device <index>] [--gpu-batch-size <hashes>] [--gpu-threads-per-block <n>] [--gpu-nonces-per-thread <n>] [--gpu-max-blocks <n>] [--gpu-no-early-exit] [--challenge-prefetch <n>] [--mint-workers <n>]
   rpow2mine --prefix <hex> --difficulty <bits> [--cpu-only] [--gpu-device <index>] [--gpu-batch-size <hashes>]
 
 Environment:
@@ -520,6 +526,7 @@ Notes:
   Windows GPU mining uses CUDA and defaults to batch 268435456, 512 threads/block, 4 nonces/thread
   --gpu-batch-size 0 enables automatic GPU batch tuning
   --gpu-max-blocks 0 uses an SM-based automatic grid size
+  --gpu-no-early-exit disables cross-thread stop checks inside a CUDA batch
   --loop defaults to challenge prefetch 8 and mint workers 2 on Windows
   macOS GPU mining uses Metal"
     );

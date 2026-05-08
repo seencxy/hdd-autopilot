@@ -51,6 +51,7 @@ pub struct mining_cuda_rpow2_solver_config {
     pub threads_per_block: u32,
     pub nonces_per_thread: u32,
     pub max_blocks: u32,
+    pub early_exit: bool,
 }
 
 #[repr(C)]
@@ -155,6 +156,7 @@ pub struct Rpow2CudaSolverConfig {
     pub threads_per_block: u32,
     pub nonces_per_thread: u32,
     pub max_blocks: u32,
+    pub early_exit: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -500,6 +502,7 @@ pub fn rpow2_mine_batch(
             threads_per_block: config.threads_per_block,
             nonces_per_thread: config.nonces_per_thread,
             max_blocks: config.max_blocks,
+            early_exit: config.early_exit,
         };
         let mut raw_result = mining_cuda_rpow2_mine_result {
             found: false,
@@ -554,6 +557,7 @@ pub fn rpow2_create_session(
             threads_per_block: config.threads_per_block,
             nonces_per_thread: config.nonces_per_thread,
             max_blocks: config.max_blocks,
+            early_exit: config.early_exit,
         };
         let raw =
             mining_cuda_rpow2_session_create(device_index, &raw_job, &raw_config, start_nonce);
@@ -588,6 +592,7 @@ pub fn rpow2_benchmark(
             threads_per_block: config.threads_per_block,
             nonces_per_thread: config.nonces_per_thread,
             max_blocks: config.max_blocks,
+            early_exit: config.early_exit,
         };
         let mut raw_result = mining_cuda_rpow2_benchmark_result {
             attempts: 0,

@@ -35,6 +35,7 @@ struct mining_cuda_rpow2_solver_config {
     std::uint32_t threads_per_block;
     std::uint32_t nonces_per_thread;
     std::uint32_t max_blocks;
+    bool early_exit;
 };
 
 struct mining_cuda_rpow2_job {
