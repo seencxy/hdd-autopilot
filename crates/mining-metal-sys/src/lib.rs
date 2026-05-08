@@ -61,7 +61,32 @@ pub struct mining_metal_device_info {
 }
 
 #[repr(C)]
+pub struct mining_metal_rpow2_solver_config {
+    pub batch_size: u64,
+}
+
+#[repr(C)]
+pub struct mining_metal_rpow2_job {
+    pub nonce_prefix_ptr: *const u8,
+    pub nonce_prefix_len: usize,
+    pub difficulty_bits: u32,
+}
+
+#[repr(C)]
+pub struct mining_metal_rpow2_mine_result {
+    pub found: bool,
+    pub nonce: u64,
+    pub attempts: i64,
+    pub digest_hex: [u8; 65],
+}
+
+#[repr(C)]
 pub struct mining_metal_session {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct mining_metal_rpow2_session {
     _private: [u8; 0],
 }
 
@@ -112,8 +137,31 @@ pub struct MetalMineResult {
     pub digest_hex: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rpow2MetalSolverConfig {
+    pub batch_size: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rpow2MetalJob<'a> {
+    pub nonce_prefix: &'a [u8],
+    pub difficulty_bits: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rpow2MetalMineResult {
+    pub found: bool,
+    pub nonce: u64,
+    pub attempts: i64,
+    pub digest_hex: String,
+}
+
 pub struct MetalMiningSession {
     raw: *mut mining_metal_session,
+}
+
+pub struct Rpow2MetalMiningSession {
+    raw: *mut mining_metal_rpow2_session,
 }
 
 unsafe extern "C" {
@@ -153,6 +201,24 @@ unsafe extern "C" {
         result: *mut mining_metal_mine_result,
     ) -> bool;
     fn mining_metal_session_destroy(session: *mut mining_metal_session);
+    fn mining_metal_rpow2_mine_batch(
+        device_index: usize,
+        job: *const mining_metal_rpow2_job,
+        config: *const mining_metal_rpow2_solver_config,
+        start_nonce: u64,
+        result: *mut mining_metal_rpow2_mine_result,
+    ) -> bool;
+    fn mining_metal_rpow2_session_create(
+        device_index: usize,
+        job: *const mining_metal_rpow2_job,
+        config: *const mining_metal_rpow2_solver_config,
+        start_nonce: u64,
+    ) -> *mut mining_metal_rpow2_session;
+    fn mining_metal_rpow2_session_mine_next_batch(
+        session: *mut mining_metal_rpow2_session,
+        result: *mut mining_metal_rpow2_mine_result,
+    ) -> bool;
+    fn mining_metal_rpow2_session_destroy(session: *mut mining_metal_rpow2_session);
 }
 
 pub fn is_available() -> Result<bool, String> {
@@ -374,6 +440,77 @@ pub fn mine_batch(
     }
 }
 
+pub fn rpow2_mine_batch(
+    device_index: usize,
+    job: &Rpow2MetalJob<'_>,
+    config: Rpow2MetalSolverConfig,
+    start_nonce: u64,
+) -> Result<Rpow2MetalMineResult, String> {
+    #[cfg(not(all(target_os = "macos", mining_metal_native_enabled)))]
+    {
+        let _ = (device_index, job, config, start_nonce);
+        Err("当前平台未启用 Metal 后端".to_string())
+    }
+    #[cfg(all(target_os = "macos", mining_metal_native_enabled))]
+    unsafe {
+        let raw_job = mining_metal_rpow2_job {
+            nonce_prefix_ptr: job.nonce_prefix.as_ptr(),
+            nonce_prefix_len: job.nonce_prefix.len(),
+            difficulty_bits: job.difficulty_bits,
+        };
+        let raw_config = mining_metal_rpow2_solver_config {
+            batch_size: config.batch_size,
+        };
+        let mut raw_result = mining_metal_rpow2_mine_result {
+            found: false,
+            nonce: 0,
+            attempts: 0,
+            digest_hex: [0; 65],
+        };
+        if !mining_metal_rpow2_mine_batch(
+            device_index,
+            &raw_job,
+            &raw_config,
+            start_nonce,
+            &mut raw_result,
+        ) {
+            return Err(last_error_message());
+        }
+        Ok(to_rpow2_mine_result(raw_result))
+    }
+}
+
+pub fn rpow2_create_session(
+    device_index: usize,
+    job: &Rpow2MetalJob<'_>,
+    config: Rpow2MetalSolverConfig,
+    start_nonce: u64,
+) -> Result<Rpow2MetalMiningSession, String> {
+    #[cfg(not(all(target_os = "macos", mining_metal_native_enabled)))]
+    {
+        let _ = (device_index, job, config, start_nonce);
+        Err("当前平台未启用 Metal 后端".to_string())
+    }
+    #[cfg(all(target_os = "macos", mining_metal_native_enabled))]
+    unsafe {
+        let raw_job = mining_metal_rpow2_job {
+            nonce_prefix_ptr: job.nonce_prefix.as_ptr(),
+            nonce_prefix_len: job.nonce_prefix.len(),
+            difficulty_bits: job.difficulty_bits,
+        };
+        let raw_config = mining_metal_rpow2_solver_config {
+            batch_size: config.batch_size,
+        };
+        let raw =
+            mining_metal_rpow2_session_create(device_index, &raw_job, &raw_config, start_nonce);
+        if raw.is_null() {
+            Err(last_error_message())
+        } else {
+            Ok(Rpow2MetalMiningSession { raw })
+        }
+    }
+}
+
 pub fn create_session(
     device_index: usize,
     job: &MetalJob<'_>,
@@ -433,12 +570,46 @@ impl MetalMiningSession {
     }
 }
 
+impl Rpow2MetalMiningSession {
+    pub fn mine_next_batch(&mut self) -> Result<Rpow2MetalMineResult, String> {
+        #[cfg(not(all(target_os = "macos", mining_metal_native_enabled)))]
+        {
+            Err("当前平台未启用 Metal 后端".to_string())
+        }
+        #[cfg(all(target_os = "macos", mining_metal_native_enabled))]
+        unsafe {
+            let mut raw_result = mining_metal_rpow2_mine_result {
+                found: false,
+                nonce: 0,
+                attempts: 0,
+                digest_hex: [0; 65],
+            };
+            if !mining_metal_rpow2_session_mine_next_batch(self.raw, &mut raw_result) {
+                return Err(last_error_message());
+            }
+            Ok(to_rpow2_mine_result(raw_result))
+        }
+    }
+}
+
 impl Drop for MetalMiningSession {
     fn drop(&mut self) {
         #[cfg(all(target_os = "macos", mining_metal_native_enabled))]
         unsafe {
             if !self.raw.is_null() {
                 mining_metal_session_destroy(self.raw);
+                self.raw = std::ptr::null_mut();
+            }
+        }
+    }
+}
+
+impl Drop for Rpow2MetalMiningSession {
+    fn drop(&mut self) {
+        #[cfg(all(target_os = "macos", mining_metal_native_enabled))]
+        unsafe {
+            if !self.raw.is_null() {
+                mining_metal_rpow2_session_destroy(self.raw);
                 self.raw = std::ptr::null_mut();
             }
         }
@@ -463,6 +634,22 @@ fn to_mine_result(raw_result: mining_metal_mine_result) -> MetalMineResult {
         .unwrap_or(raw_result.digest_hex.len());
     let digest_hex = String::from_utf8_lossy(&raw_result.digest_hex[..digest_len]).to_string();
     MetalMineResult {
+        found: raw_result.found,
+        nonce: raw_result.nonce,
+        attempts: raw_result.attempts,
+        digest_hex,
+    }
+}
+
+#[cfg(all(target_os = "macos", mining_metal_native_enabled))]
+fn to_rpow2_mine_result(raw_result: mining_metal_rpow2_mine_result) -> Rpow2MetalMineResult {
+    let digest_len = raw_result
+        .digest_hex
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(raw_result.digest_hex.len());
+    let digest_hex = String::from_utf8_lossy(&raw_result.digest_hex[..digest_len]).to_string();
+    Rpow2MetalMineResult {
         found: raw_result.found,
         nonce: raw_result.nonce,
         attempts: raw_result.attempts,

@@ -6,6 +6,7 @@
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <utility>
@@ -411,6 +412,305 @@ std::vector<SolverConfig> Solver::build_benchmark_candidates(std::size_t max_bat
         candidates.push_back(fallback_config);
     }
     return candidates;
+}
+
+namespace {
+
+struct Rpow2CudaKernelParams {
+    std::uint32_t prefix_len;
+    std::uint32_t difficulty_bits;
+    std::uint32_t block_count;
+    std::uint32_t padding;
+    unsigned long long start_nonce;
+    unsigned long long batch_size;
+};
+
+struct Rpow2CudaDeviceResult {
+    unsigned int found;
+    unsigned long long nonce;
+    std::uint32_t digest_words[8];
+};
+
+__constant__ std::uint32_t kRpow2Sha256K[64] = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+    0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+};
+
+__device__ std::uint32_t rpow2_rotr32(std::uint32_t value, unsigned int bits) {
+    return (value >> bits) | (value << (32u - bits));
+}
+
+__device__ void rpow2_write_nonce_words(std::uint32_t* w,
+                                        std::uint32_t block,
+                                        std::uint32_t prefix_len,
+                                        unsigned long long nonce) {
+    for (std::uint32_t i = 0; i < 8; ++i) {
+        const std::uint32_t absolute_byte = prefix_len + i;
+        if ((absolute_byte >> 6) != block) {
+            continue;
+        }
+        const std::uint32_t block_byte = absolute_byte & 63u;
+        const std::uint32_t word_index = block_byte >> 2;
+        const std::uint32_t byte_index = block_byte & 3u;
+        const std::uint32_t shift = (3u - byte_index) * 8u;
+        w[word_index] |= static_cast<std::uint32_t>((nonce >> (i * 8u)) & 0xffull) << shift;
+    }
+}
+
+__device__ std::uint32_t rpow2_trailing_zero_bits(std::uint32_t h0,
+                                                  std::uint32_t h1,
+                                                  std::uint32_t h2,
+                                                  std::uint32_t h3,
+                                                  std::uint32_t h4,
+                                                  std::uint32_t h5,
+                                                  std::uint32_t h6,
+                                                  std::uint32_t h7) {
+    std::uint32_t words[8] = {h0, h1, h2, h3, h4, h5, h6, h7};
+    std::uint32_t bits = 0;
+    for (int i = 7; i >= 0; --i) {
+        const std::uint32_t word = words[i];
+        if (word == 0) {
+            bits += 32;
+            continue;
+        }
+        return bits + static_cast<std::uint32_t>(__ffs(word) - 1);
+    }
+    return bits;
+}
+
+__global__ void rpow2_mine_kernel(const std::uint32_t* template_words,
+                                  Rpow2CudaKernelParams params,
+                                  Rpow2CudaDeviceResult* result) {
+    const unsigned long long gid = static_cast<unsigned long long>(blockIdx.x)
+        * static_cast<unsigned long long>(blockDim.x)
+        + static_cast<unsigned long long>(threadIdx.x);
+    if (gid >= params.batch_size || result->found != 0u) {
+        return;
+    }
+
+    const unsigned long long nonce = params.start_nonce + gid;
+    std::uint32_t h0 = 0x6a09e667;
+    std::uint32_t h1 = 0xbb67ae85;
+    std::uint32_t h2 = 0x3c6ef372;
+    std::uint32_t h3 = 0xa54ff53a;
+    std::uint32_t h4 = 0x510e527f;
+    std::uint32_t h5 = 0x9b05688c;
+    std::uint32_t h6 = 0x1f83d9ab;
+    std::uint32_t h7 = 0x5be0cd19;
+
+    for (std::uint32_t block = 0; block < params.block_count; ++block) {
+        std::uint32_t w[64];
+        for (std::uint32_t i = 0; i < 16; ++i) {
+            w[i] = template_words[block * 16u + i];
+        }
+        rpow2_write_nonce_words(w, block, params.prefix_len, nonce);
+        for (std::uint32_t i = 16; i < 64; ++i) {
+            const std::uint32_t s0 = rpow2_rotr32(w[i - 15], 7u)
+                ^ rpow2_rotr32(w[i - 15], 18u)
+                ^ (w[i - 15] >> 3);
+            const std::uint32_t s1 = rpow2_rotr32(w[i - 2], 17u)
+                ^ rpow2_rotr32(w[i - 2], 19u)
+                ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+        }
+
+        std::uint32_t a = h0;
+        std::uint32_t b = h1;
+        std::uint32_t c = h2;
+        std::uint32_t d = h3;
+        std::uint32_t e = h4;
+        std::uint32_t f = h5;
+        std::uint32_t g = h6;
+        std::uint32_t h = h7;
+        for (std::uint32_t i = 0; i < 64; ++i) {
+            const std::uint32_t s1 = rpow2_rotr32(e, 6u)
+                ^ rpow2_rotr32(e, 11u)
+                ^ rpow2_rotr32(e, 25u);
+            const std::uint32_t ch = (e & f) ^ ((~e) & g);
+            const std::uint32_t temp1 = h + s1 + ch + kRpow2Sha256K[i] + w[i];
+            const std::uint32_t s0 = rpow2_rotr32(a, 2u)
+                ^ rpow2_rotr32(a, 13u)
+                ^ rpow2_rotr32(a, 22u);
+            const std::uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+            const std::uint32_t temp2 = s0 + maj;
+            h = g;
+            g = f;
+            f = e;
+            e = d + temp1;
+            d = c;
+            c = b;
+            b = a;
+            a = temp1 + temp2;
+        }
+
+        h0 += a;
+        h1 += b;
+        h2 += c;
+        h3 += d;
+        h4 += e;
+        h5 += f;
+        h6 += g;
+        h7 += h;
+    }
+
+    if (rpow2_trailing_zero_bits(h0, h1, h2, h3, h4, h5, h6, h7) >= params.difficulty_bits) {
+        if (atomicCAS(&result->found, 0u, 1u) == 0u) {
+            result->nonce = nonce;
+            result->digest_words[0] = h0;
+            result->digest_words[1] = h1;
+            result->digest_words[2] = h2;
+            result->digest_words[3] = h3;
+            result->digest_words[4] = h4;
+            result->digest_words[5] = h5;
+            result->digest_words[6] = h6;
+            result->digest_words[7] = h7;
+        }
+    }
+}
+
+void check_cuda(cudaError_t status, const char* message) {
+    if (status != cudaSuccess) {
+        throw std::runtime_error(std::string(message) + ": " + cudaGetErrorString(status));
+    }
+}
+
+std::vector<std::uint32_t> build_rpow2_template_words(const std::uint8_t* prefix,
+                                                      std::size_t prefix_len) {
+    const auto message_len = prefix_len + 8;
+    const auto padded_len = ((message_len + 9 + 63) / 64) * 64;
+    if (padded_len > 128) {
+        throw std::runtime_error("RPOW2 padded message is too long for CUDA solver");
+    }
+
+    std::array<std::uint8_t, 128> padded{};
+    if (prefix_len > 0) {
+        std::memcpy(padded.data(), prefix, prefix_len);
+    }
+    padded[message_len] = 0x80;
+    const auto bit_len = static_cast<std::uint64_t>(message_len) * 8;
+    for (std::size_t i = 0; i < 8; ++i) {
+        padded[padded_len - 1 - i] = static_cast<std::uint8_t>((bit_len >> (i * 8)) & 0xff);
+    }
+
+    std::vector<std::uint32_t> words(padded_len / 4);
+    for (std::size_t index = 0; index < words.size(); ++index) {
+        const auto offset = index * 4;
+        words[index] = (static_cast<std::uint32_t>(padded[offset]) << 24)
+            | (static_cast<std::uint32_t>(padded[offset + 1]) << 16)
+            | (static_cast<std::uint32_t>(padded[offset + 2]) << 8)
+            | static_cast<std::uint32_t>(padded[offset + 3]);
+    }
+    return words;
+}
+
+void digest_words_to_bytes(const std::uint32_t words[8], std::array<std::uint8_t, 32>& digest) {
+    for (std::size_t index = 0; index < 8; ++index) {
+        digest[index * 4] = static_cast<std::uint8_t>((words[index] >> 24) & 0xff);
+        digest[index * 4 + 1] = static_cast<std::uint8_t>((words[index] >> 16) & 0xff);
+        digest[index * 4 + 2] = static_cast<std::uint8_t>((words[index] >> 8) & 0xff);
+        digest[index * 4 + 3] = static_cast<std::uint8_t>(words[index] & 0xff);
+    }
+}
+
+} // namespace
+
+Rpow2CudaBatchResult mine_rpow2_cuda_batch(std::size_t device_index,
+                                           const std::uint8_t* nonce_prefix,
+                                           std::size_t nonce_prefix_len,
+                                           std::uint32_t difficulty_bits,
+                                           std::uint64_t batch_size,
+                                           std::uint64_t start_nonce) {
+    if (nonce_prefix == nullptr && nonce_prefix_len > 0) {
+        throw std::runtime_error("RPOW2 nonce prefix pointer is null");
+    }
+    if (nonce_prefix_len > 111) {
+        throw std::runtime_error("RPOW2 nonce prefix is too long for CUDA solver");
+    }
+    if (batch_size == 0) {
+        throw std::runtime_error("RPOW2 CUDA batch size must be greater than zero");
+    }
+    if (batch_size > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::runtime_error("RPOW2 CUDA batch size exceeds kernel grid limit");
+    }
+    if (std::numeric_limits<std::uint64_t>::max() - start_nonce < batch_size) {
+        throw std::runtime_error("RPOW2 CUDA nonce range exhausted");
+    }
+
+    check_cuda(cudaSetDevice(static_cast<int>(device_index)), "cudaSetDevice failed");
+    const auto template_words = build_rpow2_template_words(nonce_prefix, nonce_prefix_len);
+
+    std::uint32_t* device_template = nullptr;
+    Rpow2CudaDeviceResult* device_result = nullptr;
+    check_cuda(cudaMalloc(reinterpret_cast<void**>(&device_template),
+                          template_words.size() * sizeof(std::uint32_t)),
+               "cudaMalloc template failed");
+    try {
+        check_cuda(cudaMalloc(reinterpret_cast<void**>(&device_result),
+                              sizeof(Rpow2CudaDeviceResult)),
+                   "cudaMalloc result failed");
+        check_cuda(cudaMemcpy(device_template,
+                              template_words.data(),
+                              template_words.size() * sizeof(std::uint32_t),
+                              cudaMemcpyHostToDevice),
+                   "cudaMemcpy template failed");
+        check_cuda(cudaMemset(device_result, 0, sizeof(Rpow2CudaDeviceResult)),
+                   "cudaMemset result failed");
+
+        Rpow2CudaKernelParams params{};
+        params.prefix_len = static_cast<std::uint32_t>(nonce_prefix_len);
+        params.difficulty_bits = difficulty_bits;
+        params.block_count = static_cast<std::uint32_t>(template_words.size() / 16);
+        params.padding = 0;
+        params.start_nonce = static_cast<unsigned long long>(start_nonce);
+        params.batch_size = static_cast<unsigned long long>(batch_size);
+
+        constexpr unsigned int threads_per_block = 256;
+        const auto blocks = static_cast<unsigned int>(
+            (batch_size + threads_per_block - 1) / threads_per_block);
+        rpow2_mine_kernel<<<blocks, threads_per_block>>>(device_template, params, device_result);
+        check_cuda(cudaGetLastError(), "RPOW2 CUDA kernel launch failed");
+        check_cuda(cudaDeviceSynchronize(), "RPOW2 CUDA kernel execution failed");
+
+        Rpow2CudaDeviceResult host_result{};
+        check_cuda(cudaMemcpy(&host_result,
+                              device_result,
+                              sizeof(host_result),
+                              cudaMemcpyDeviceToHost),
+                   "cudaMemcpy result failed");
+
+        Rpow2CudaBatchResult result;
+        result.found = host_result.found != 0u;
+        result.nonce = host_result.nonce;
+        result.attempts = static_cast<std::int64_t>(batch_size);
+        if (result.found) {
+            digest_words_to_bytes(host_result.digest_words, result.digest);
+        }
+        cudaFree(device_result);
+        cudaFree(device_template);
+        return result;
+    } catch (...) {
+        if (device_result != nullptr) {
+            cudaFree(device_result);
+        }
+        if (device_template != nullptr) {
+            cudaFree(device_template);
+        }
+        throw;
+    }
 }
 
 } // namespace app

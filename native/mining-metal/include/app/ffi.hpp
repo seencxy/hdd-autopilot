@@ -27,6 +27,7 @@ struct mining_metal_job {
 };
 
 struct mining_metal_session;
+struct mining_metal_rpow2_session;
 
 struct mining_metal_benchmark_result {
     std::size_t batch_size;
@@ -57,6 +58,23 @@ struct mining_metal_device_info {
     char name[128];
 };
 
+struct mining_metal_rpow2_solver_config {
+    std::uint64_t batch_size;
+};
+
+struct mining_metal_rpow2_job {
+    const std::uint8_t* nonce_prefix_ptr;
+    std::size_t nonce_prefix_len;
+    std::uint32_t difficulty_bits;
+};
+
+struct mining_metal_rpow2_mine_result {
+    bool found;
+    std::uint64_t nonce;
+    std::int64_t attempts;
+    char digest_hex[65];
+};
+
 MINING_METAL_EXPORT bool mining_metal_is_available();
 MINING_METAL_EXPORT bool mining_metal_validate();
 MINING_METAL_EXPORT bool mining_metal_validate_device(std::size_t device_index);
@@ -85,3 +103,18 @@ MINING_METAL_EXPORT bool mining_metal_session_mine_next_batch(
     mining_metal_session* session,
     mining_metal_mine_result* result);
 MINING_METAL_EXPORT void mining_metal_session_destroy(mining_metal_session* session);
+MINING_METAL_EXPORT bool mining_metal_rpow2_mine_batch(
+    std::size_t device_index,
+    const mining_metal_rpow2_job* job,
+    const mining_metal_rpow2_solver_config* config,
+    std::uint64_t start_nonce,
+    mining_metal_rpow2_mine_result* result);
+MINING_METAL_EXPORT mining_metal_rpow2_session* mining_metal_rpow2_session_create(
+    std::size_t device_index,
+    const mining_metal_rpow2_job* job,
+    const mining_metal_rpow2_solver_config* config,
+    std::uint64_t start_nonce);
+MINING_METAL_EXPORT bool mining_metal_rpow2_session_mine_next_batch(
+    mining_metal_rpow2_session* session,
+    mining_metal_rpow2_mine_result* result);
+MINING_METAL_EXPORT void mining_metal_rpow2_session_destroy(mining_metal_rpow2_session* session);

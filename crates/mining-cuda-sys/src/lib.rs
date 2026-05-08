@@ -46,6 +46,26 @@ pub struct mining_cuda_mine_result {
 }
 
 #[repr(C)]
+pub struct mining_cuda_rpow2_solver_config {
+    pub batch_size: u64,
+}
+
+#[repr(C)]
+pub struct mining_cuda_rpow2_job {
+    pub nonce_prefix_ptr: *const u8,
+    pub nonce_prefix_len: usize,
+    pub difficulty_bits: u32,
+}
+
+#[repr(C)]
+pub struct mining_cuda_rpow2_mine_result {
+    pub found: bool,
+    pub nonce: u64,
+    pub attempts: i64,
+    pub digest_hex: [u8; 65],
+}
+
+#[repr(C)]
 pub struct mining_cuda_device_info {
     pub device_index: usize,
     pub global_memory_bytes: u64,
@@ -110,6 +130,25 @@ pub struct CudaMineResult {
     pub digest_hex: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rpow2CudaSolverConfig {
+    pub batch_size: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rpow2CudaJob<'a> {
+    pub nonce_prefix: &'a [u8],
+    pub difficulty_bits: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rpow2CudaMineResult {
+    pub found: bool,
+    pub nonce: u64,
+    pub attempts: i64,
+    pub digest_hex: String,
+}
+
 pub struct CudaMiningSession {
     raw: *mut mining_cuda_session,
 }
@@ -152,6 +191,13 @@ unsafe extern "C" {
         result: *mut mining_cuda_mine_result,
     ) -> bool;
     fn mining_cuda_session_destroy(session: *mut mining_cuda_session);
+    fn mining_cuda_rpow2_mine_batch(
+        device_index: usize,
+        job: *const mining_cuda_rpow2_job,
+        config: *const mining_cuda_rpow2_solver_config,
+        start_nonce: u64,
+        result: *mut mining_cuda_rpow2_mine_result,
+    ) -> bool;
     fn mining_argon2id_hash_raw(
         password_ptr: *const u8,
         password_len: usize,
@@ -367,6 +413,57 @@ pub fn mine_batch(
             .unwrap_or(raw_result.digest_hex.len());
         let digest_hex = String::from_utf8_lossy(&raw_result.digest_hex[..digest_len]).to_string();
         Ok(CudaMineResult {
+            found: raw_result.found,
+            nonce: raw_result.nonce,
+            attempts: raw_result.attempts,
+            digest_hex,
+        })
+    }
+}
+
+pub fn rpow2_mine_batch(
+    device_index: usize,
+    job: &Rpow2CudaJob<'_>,
+    config: Rpow2CudaSolverConfig,
+    start_nonce: u64,
+) -> Result<Rpow2CudaMineResult, String> {
+    #[cfg(not(mining_cuda_native_enabled))]
+    {
+        let _ = (device_index, job, config, start_nonce);
+        Err("CUDA backend is not enabled on this platform.".to_string())
+    }
+    #[cfg(mining_cuda_native_enabled)]
+    unsafe {
+        let raw_job = mining_cuda_rpow2_job {
+            nonce_prefix_ptr: job.nonce_prefix.as_ptr(),
+            nonce_prefix_len: job.nonce_prefix.len(),
+            difficulty_bits: job.difficulty_bits,
+        };
+        let raw_config = mining_cuda_rpow2_solver_config {
+            batch_size: config.batch_size,
+        };
+        let mut raw_result = mining_cuda_rpow2_mine_result {
+            found: false,
+            nonce: 0,
+            attempts: 0,
+            digest_hex: [0; 65],
+        };
+        if !mining_cuda_rpow2_mine_batch(
+            device_index,
+            &raw_job,
+            &raw_config,
+            start_nonce,
+            &mut raw_result,
+        ) {
+            return Err(last_error_message());
+        }
+        let digest_len = raw_result
+            .digest_hex
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(raw_result.digest_hex.len());
+        let digest_hex = String::from_utf8_lossy(&raw_result.digest_hex[..digest_len]).to_string();
+        Ok(Rpow2CudaMineResult {
             found: raw_result.found,
             nonce: raw_result.nonce,
             attempts: raw_result.attempts,

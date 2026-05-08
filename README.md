@@ -127,6 +127,42 @@ GPU 后端支持情况：
 | OpenCL | Windows、macOS、Linux | OpenCL headers、ICD loader 和厂商运行时 |
 | Metal | macOS | macOS 原生构建环境 |
 
+### RPOW2 挖矿
+
+RPOW2（`https://rpow2.com/#/mine`）和号多多挖矿不是同一套协议。网页端会从 `https://api.rpow2.com/challenge` 取 `challenge_id`、`nonce_prefix` 和 `difficulty_bits`，然后计算：
+
+```text
+sha256(nonce_prefix_bytes || little_endian_u64(solution_nonce))
+```
+
+命中条件是 SHA-256 digest 的尾部零 bit 数大于等于 `difficulty_bits`。找到后提交：
+
+```text
+POST https://api.rpow2.com/mint
+{ "challenge_id": ..., "solution_nonce": "..." }
+```
+
+本仓库提供独立入口：
+
+```bash
+RPOW2_COOKIE='从已登录浏览器请求里复制的 Cookie 请求头' cargo run --release --bin rpow2mine
+```
+
+Windows 构建启用 CUDA 后会优先用 NVIDIA GPU；macOS 构建启用 Metal 后会优先用 Metal GPU；失败或不可用时回退 CPU。RPOW2 的 GPU 路径会自动试探 batch size，并在 GPU 命中后用 CPU 重新验算 digest 再提交。也可以离线验证 solver：
+
+```bash
+cargo run --release --bin rpow2mine -- --prefix <nonce_prefix_hex> --difficulty <bits> --cpu-only
+```
+
+固定 GPU batch size 时传 `--gpu-batch-size <hashes>`；默认 `0` 表示自动调优。多块 GPU 时可用 `--gpu-device <index>` 指定设备。
+
+Windows 上要真正看到 `backend=CUDA`，需要在那台机器安装 CUDA Toolkit、CMake 和可用的 NVIDIA 驱动，然后用 release 构建运行：
+
+```powershell
+$env:RPOW2_COOKIE='从已登录浏览器请求里复制的 Cookie 请求头'
+cargo run --release --bin rpow2mine -- --loop --gpu-device 0
+```
+
 ## 自动玩法策略
 
 所有需要登录的功能共用同一套账号和异常处理：

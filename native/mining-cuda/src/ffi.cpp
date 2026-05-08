@@ -120,6 +120,18 @@ void fill_mine_result(const app::SolveResult& mined,
     }
 }
 
+void fill_rpow2_mine_result(const app::Rpow2CudaBatchResult& mined,
+                            mining_cuda_rpow2_mine_result* result) {
+    result->found = mined.found;
+    result->nonce = mined.nonce;
+    result->attempts = mined.attempts;
+    std::fill(std::begin(result->digest_hex), std::end(result->digest_hex), '\0');
+    if (mined.found) {
+        const auto digest = app::hex_encode(mined.digest.data(), mined.digest.size());
+        std::strncpy(result->digest_hex, digest.c_str(), sizeof(result->digest_hex) - 1);
+    }
+}
+
 void fill_device_info(std::size_t device_index, mining_cuda_device_info* result) {
     argon2::cuda::GlobalContext global;
     const auto& devices = global.getAllDevices();
@@ -331,6 +343,33 @@ bool mining_cuda_session_mine_next_batch(
 
 void mining_cuda_session_destroy(mining_cuda_session* session) {
     delete session;
+}
+
+bool mining_cuda_rpow2_mine_batch(
+    std::size_t device_index,
+    const mining_cuda_rpow2_job* job,
+    const mining_cuda_rpow2_solver_config* config,
+    std::uint64_t start_nonce,
+    mining_cuda_rpow2_mine_result* result) {
+    if (job == nullptr || config == nullptr || result == nullptr) {
+        g_last_error = "rpow2 mine_batch parameter is null";
+        return false;
+    }
+    try {
+        clear_last_error();
+        const auto mined = app::mine_rpow2_cuda_batch(
+            device_index,
+            job->nonce_prefix_ptr,
+            job->nonce_prefix_len,
+            job->difficulty_bits,
+            config->batch_size,
+            start_nonce);
+        fill_rpow2_mine_result(mined, result);
+        return true;
+    } catch (const std::exception& error) {
+        set_last_error(error);
+        return false;
+    }
 }
 
 bool mining_argon2id_hash_raw(

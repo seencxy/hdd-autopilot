@@ -5,6 +5,7 @@ mod error;
 mod gpu;
 mod messages;
 mod protocol;
+pub mod rpow2;
 mod runner;
 
 use std::sync::Arc;
