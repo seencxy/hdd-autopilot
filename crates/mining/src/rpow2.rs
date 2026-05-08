@@ -15,6 +15,7 @@ const CPU_ATTEMPT_FLUSH_INTERVAL: i64 = 4096;
 const AUTO_GPU_BATCH_SIZE: u64 = 0;
 const FALLBACK_GPU_BATCH_SIZE: u64 = 1 << 22;
 const GPU_AUTO_TUNE_BATCH_SIZES: [u64; 4] = [1 << 18, 1 << 20, 1 << 22, 1 << 24];
+const RPOW2_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rpow2Job {
@@ -178,8 +179,8 @@ impl Rpow2Client {
             base_url: base_url.trim().trim_end_matches('/').to_string(),
             http_client: Client::builder()
                 .default_headers(headers)
-                .timeout(Duration::from_secs(30))
-                .connect_timeout(Duration::from_secs(10))
+                .timeout(RPOW2_HTTP_TIMEOUT)
+                .connect_timeout(RPOW2_HTTP_TIMEOUT)
                 .build()?,
         })
     }
