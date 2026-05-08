@@ -1,7 +1,8 @@
 use std::env;
 use std::error::Error;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -11,7 +12,8 @@ use hdd_autopilot as _;
 use iana_time_zone as _;
 use mining::MiningError;
 use mining::rpow2::{
-    Rpow2Backend, Rpow2Client, Rpow2Job, Rpow2MineConfig, mine_rpow2, rpow2_meets_difficulty,
+    Rpow2Backend, Rpow2Challenge, Rpow2Client, Rpow2Job, Rpow2MineConfig, mine_rpow2,
+    rpow2_meets_difficulty,
 };
 use rand as _;
 use reqwest as _;
@@ -61,25 +63,68 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         println!("ledger: {}", ledger);
     }
 
-    loop {
-        let challenge = retry_online("challenge", || client.challenge())?;
-        println!(
-            "challenge={} difficulty={} prefix={}",
-            challenge.challenge_id, challenge.difficulty_bits, challenge.nonce_prefix
-        );
-        let job = challenge.job()?;
-        let result = solve_job(&job, &args)?;
-        println!(
-            "found solution_nonce={} digest={} backend={:?} attempts={}",
-            result.nonce, result.digest_hex, result.backend, result.attempts
-        );
-        let mint = mint_with_recovery(&client, &challenge.challenge_id, result.nonce)?;
-        println!("mint: {}", mint);
-        if !args.loop_forever {
-            break;
-        }
+    if args.loop_forever {
+        run_pipelined_loop(&client, &args)?;
+    } else {
+        run_single_round(&client, &args)?;
     }
     Ok(())
+}
+
+fn run_single_round(client: &Rpow2Client, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    let challenge = retry_online("challenge", || client.challenge())?;
+    let result = mine_challenge(&challenge, args)?;
+    let mint = mint_with_recovery(client, &challenge.challenge_id, result.nonce)?;
+    println!("mint: {}", mint);
+    Ok(())
+}
+
+fn run_pipelined_loop(client: &Rpow2Client, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    let prefetch_depth = args
+        .challenge_prefetch
+        .unwrap_or_else(default_challenge_prefetch)
+        .max(1);
+    let mint_workers = args
+        .mint_workers
+        .unwrap_or_else(default_mint_workers)
+        .max(1);
+    println!(
+        "pipeline challenge_prefetch={} mint_workers={}",
+        prefetch_depth, mint_workers
+    );
+
+    let challenges = spawn_challenge_prefetchers(client.clone(), prefetch_depth);
+    let mint_sender = spawn_mint_workers(client.clone(), mint_workers);
+
+    loop {
+        let challenge = challenges
+            .recv()
+            .map_err(|_| "challenge prefetchers stopped unexpectedly")?;
+        let result = mine_challenge(&challenge, args)?;
+        mint_sender
+            .send(MintJob {
+                challenge_id: challenge.challenge_id,
+                solution_nonce: result.nonce,
+            })
+            .map_err(|_| "mint workers stopped unexpectedly")?;
+    }
+}
+
+fn mine_challenge(
+    challenge: &Rpow2Challenge,
+    args: &Args,
+) -> Result<mining::rpow2::Rpow2MineResult, Box<dyn std::error::Error>> {
+    println!(
+        "challenge={} difficulty={} prefix={}",
+        challenge.challenge_id, challenge.difficulty_bits, challenge.nonce_prefix
+    );
+    let job = challenge.job()?;
+    let result = solve_job(&job, args)?;
+    println!(
+        "found challenge={} solution_nonce={} digest={} backend={:?} attempts={}",
+        challenge.challenge_id, result.nonce, result.digest_hex, result.backend, result.attempts
+    );
+    Ok(result)
 }
 
 fn solve_job(
@@ -115,6 +160,75 @@ fn solve_job(
     };
     println!("{} speed: {:.2} H/s", backend, speed);
     Ok(result)
+}
+
+#[derive(Debug, Clone)]
+struct MintJob {
+    challenge_id: String,
+    solution_nonce: u64,
+}
+
+fn spawn_challenge_prefetchers(
+    client: Rpow2Client,
+    prefetch_depth: usize,
+) -> Receiver<Rpow2Challenge> {
+    let (sender, receiver) = sync_channel(prefetch_depth);
+    for worker_index in 0..prefetch_depth {
+        let client = client.clone();
+        let sender = sender.clone();
+        thread::spawn(move || {
+            let label = format!("challenge-prefetch-{worker_index}");
+            loop {
+                match retry_online(&label, || client.challenge()) {
+                    Ok(challenge) => {
+                        if sender.send(challenge).is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "{} stopped after non-retryable error: {}; retrying worker in 15s",
+                            label,
+                            error_chain_to_string(&error)
+                        );
+                        thread::sleep(Duration::from_secs(15));
+                    }
+                }
+            }
+        });
+    }
+    drop(sender);
+    receiver
+}
+
+fn spawn_mint_workers(client: Rpow2Client, worker_count: usize) -> SyncSender<MintJob> {
+    let (sender, receiver) = sync_channel::<MintJob>(worker_count.saturating_mul(4).max(1));
+    let receiver = Arc::new(Mutex::new(receiver));
+    for worker_index in 0..worker_count {
+        let client = client.clone();
+        let receiver = Arc::clone(&receiver);
+        thread::spawn(move || {
+            loop {
+                let job = {
+                    let receiver = receiver.lock().expect("mint receiver lock poisoned");
+                    receiver.recv()
+                };
+                let Ok(job) = job else {
+                    break;
+                };
+                match mint_with_recovery(&client, &job.challenge_id, job.solution_nonce) {
+                    Ok(value) => println!("mint: {}", value),
+                    Err(error) => eprintln!(
+                        "mint worker {} failed for challenge={}: {}",
+                        worker_index,
+                        job.challenge_id,
+                        error_chain_to_string(&error)
+                    ),
+                }
+            }
+        });
+    }
+    sender
 }
 
 fn mint_with_recovery(
@@ -161,6 +275,28 @@ fn default_gpu_batch_size() -> u64 {
     #[cfg(not(target_os = "windows"))]
     {
         0
+    }
+}
+
+fn default_challenge_prefetch() -> usize {
+    #[cfg(target_os = "windows")]
+    {
+        8
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        2
+    }
+}
+
+fn default_mint_workers() -> usize {
+    #[cfg(target_os = "windows")]
+    {
+        2
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        1
     }
 }
 
@@ -264,6 +400,8 @@ struct Args {
     cpu_threads: Option<usize>,
     gpu_batch_size: Option<u64>,
     gpu_device_index: Option<usize>,
+    challenge_prefetch: Option<usize>,
+    mint_workers: Option<usize>,
 }
 
 impl Args {
@@ -300,6 +438,15 @@ impl Args {
                     args.gpu_device_index =
                         Some(next_value(&raw, index, raw[index - 1].as_str())?.parse()?);
                 }
+                "--challenge-prefetch" => {
+                    index += 1;
+                    args.challenge_prefetch =
+                        Some(next_value(&raw, index, "--challenge-prefetch")?.parse()?);
+                }
+                "--mint-workers" => {
+                    index += 1;
+                    args.mint_workers = Some(next_value(&raw, index, "--mint-workers")?.parse()?);
+                }
                 "-h" | "--help" => args.help = true,
                 other => return Err(format!("unknown argument: {other}").into()),
             }
@@ -325,7 +472,7 @@ fn next_value<'a>(
 fn print_usage() {
     println!(
         "Usage:
-  rpow2mine --cookie '<cookie-header>' [--loop] [--cpu-only] [--gpu-device <index>] [--gpu-batch-size <hashes>]
+  rpow2mine --cookie '<cookie-header>' [--loop] [--cpu-only] [--gpu-device <index>] [--gpu-batch-size <hashes>] [--challenge-prefetch <n>] [--mint-workers <n>]
   rpow2mine --prefix <hex> --difficulty <bits> [--cpu-only] [--gpu-device <index>] [--gpu-batch-size <hashes>]
 
 Environment:
@@ -334,6 +481,7 @@ Environment:
 Notes:
   Windows GPU mining uses CUDA and defaults to a full-size 2147483648 hash batch
   --gpu-batch-size 0 enables automatic GPU batch tuning
+  --loop defaults to challenge prefetch 8 and mint workers 2 on Windows
   macOS GPU mining uses Metal"
     );
 }
