@@ -175,6 +175,22 @@ struct mining_cuda_session {
     }
 };
 
+struct mining_cuda_rpow2_session {
+    app::Rpow2CudaSession session;
+
+    mining_cuda_rpow2_session(std::size_t device_index,
+                              const mining_cuda_rpow2_job& job,
+                              const mining_cuda_rpow2_solver_config& config,
+                              std::uint64_t start_nonce)
+        : session(device_index,
+                  job.nonce_prefix_ptr,
+                  job.nonce_prefix_len,
+                  job.difficulty_bits,
+                  config.batch_size,
+                  start_nonce) {
+    }
+};
+
 bool mining_cuda_is_available() {
     try {
         clear_last_error();
@@ -370,6 +386,46 @@ bool mining_cuda_rpow2_mine_batch(
         set_last_error(error);
         return false;
     }
+}
+
+mining_cuda_rpow2_session* mining_cuda_rpow2_session_create(
+    std::size_t device_index,
+    const mining_cuda_rpow2_job* job,
+    const mining_cuda_rpow2_solver_config* config,
+    std::uint64_t start_nonce) {
+    if (job == nullptr || config == nullptr) {
+        g_last_error = "rpow2 session_create parameter is null";
+        return nullptr;
+    }
+    try {
+        clear_last_error();
+        return new mining_cuda_rpow2_session(device_index, *job, *config, start_nonce);
+    } catch (const std::exception& error) {
+        set_last_error(error);
+        return nullptr;
+    }
+}
+
+bool mining_cuda_rpow2_session_mine_next_batch(
+    mining_cuda_rpow2_session* session,
+    mining_cuda_rpow2_mine_result* result) {
+    if (session == nullptr || result == nullptr) {
+        g_last_error = "rpow2 session_mine_next_batch parameter is null";
+        return false;
+    }
+    try {
+        clear_last_error();
+        const auto mined = session->session.mine_next_batch();
+        fill_rpow2_mine_result(mined, result);
+        return true;
+    } catch (const std::exception& error) {
+        set_last_error(error);
+        return false;
+    }
+}
+
+void mining_cuda_rpow2_session_destroy(mining_cuda_rpow2_session* session) {
+    delete session;
 }
 
 bool mining_argon2id_hash_raw(

@@ -148,7 +148,7 @@ POST https://api.rpow2.com/mint
 RPOW2_COOKIE='从已登录浏览器请求里复制的 Cookie 请求头' cargo run --release --bin rpow2mine
 ```
 
-Windows 构建启用 CUDA 后会优先用 NVIDIA GPU；macOS 构建启用 Metal 后会优先用 Metal GPU；失败或不可用时回退 CPU。RPOW2 的 GPU 路径会自动试探 batch size，并在 GPU 命中后用 CPU 重新验算 digest 再提交。也可以离线验证 solver：
+Windows 构建启用 CUDA 后会优先用 NVIDIA GPU；macOS 构建启用 Metal 后会优先用 Metal GPU；失败或不可用时回退 CPU。RPOW2 的 GPU 路径会自动试探 batch size，并在 GPU 命中后用 CPU 重新验算 digest 再提交。CUDA 路径会复用持久计算会话，避免每个 batch 重新分配显存。也可以离线验证 solver：
 
 ```bash
 cargo run --release --bin rpow2mine -- --prefix <nonce_prefix_hex> --difficulty <bits> --cpu-only

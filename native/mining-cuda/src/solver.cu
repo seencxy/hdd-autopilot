@@ -628,12 +628,17 @@ void digest_words_to_bytes(const std::uint32_t words[8], std::array<std::uint8_t
 
 } // namespace
 
-Rpow2CudaBatchResult mine_rpow2_cuda_batch(std::size_t device_index,
-                                           const std::uint8_t* nonce_prefix,
-                                           std::size_t nonce_prefix_len,
-                                           std::uint32_t difficulty_bits,
-                                           std::uint64_t batch_size,
-                                           std::uint64_t start_nonce) {
+Rpow2CudaSession::Rpow2CudaSession(std::size_t device_index,
+                                   const std::uint8_t* nonce_prefix,
+                                   std::size_t nonce_prefix_len,
+                                   std::uint32_t difficulty_bits,
+                                   std::uint64_t batch_size,
+                                   std::uint64_t start_nonce)
+    : device_index_(static_cast<int>(device_index)),
+      prefix_len_(static_cast<std::uint32_t>(nonce_prefix_len)),
+      difficulty_bits_(difficulty_bits),
+      batch_size_(batch_size),
+      next_nonce_(start_nonce) {
     if (nonce_prefix == nullptr && nonce_prefix_len > 0) {
         throw std::runtime_error("RPOW2 nonce prefix pointer is null");
     }
@@ -650,67 +655,105 @@ Rpow2CudaBatchResult mine_rpow2_cuda_batch(std::size_t device_index,
         throw std::runtime_error("RPOW2 CUDA nonce range exhausted");
     }
 
-    check_cuda(cudaSetDevice(static_cast<int>(device_index)), "cudaSetDevice failed");
+    check_cuda(cudaSetDevice(device_index_), "cudaSetDevice failed");
     const auto template_words = build_rpow2_template_words(nonce_prefix, nonce_prefix_len);
+    block_count_ = static_cast<std::uint32_t>(template_words.size() / 16);
 
-    std::uint32_t* device_template = nullptr;
-    Rpow2CudaDeviceResult* device_result = nullptr;
-    check_cuda(cudaMalloc(reinterpret_cast<void**>(&device_template),
+    check_cuda(cudaMalloc(&device_template_,
                           template_words.size() * sizeof(std::uint32_t)),
                "cudaMalloc template failed");
     try {
-        check_cuda(cudaMalloc(reinterpret_cast<void**>(&device_result),
-                              sizeof(Rpow2CudaDeviceResult)),
+        check_cuda(cudaMalloc(&device_result_, sizeof(Rpow2CudaDeviceResult)),
                    "cudaMalloc result failed");
-        check_cuda(cudaMemcpy(device_template,
+        check_cuda(cudaMemcpy(device_template_,
                               template_words.data(),
                               template_words.size() * sizeof(std::uint32_t),
                               cudaMemcpyHostToDevice),
                    "cudaMemcpy template failed");
-        check_cuda(cudaMemset(device_result, 0, sizeof(Rpow2CudaDeviceResult)),
-                   "cudaMemset result failed");
-
-        Rpow2CudaKernelParams params{};
-        params.prefix_len = static_cast<std::uint32_t>(nonce_prefix_len);
-        params.difficulty_bits = difficulty_bits;
-        params.block_count = static_cast<std::uint32_t>(template_words.size() / 16);
-        params.padding = 0;
-        params.start_nonce = static_cast<unsigned long long>(start_nonce);
-        params.batch_size = static_cast<unsigned long long>(batch_size);
-
-        constexpr unsigned int threads_per_block = 256;
-        const auto blocks = static_cast<unsigned int>(
-            (batch_size + threads_per_block - 1) / threads_per_block);
-        rpow2_mine_kernel<<<blocks, threads_per_block>>>(device_template, params, device_result);
-        check_cuda(cudaGetLastError(), "RPOW2 CUDA kernel launch failed");
-        check_cuda(cudaDeviceSynchronize(), "RPOW2 CUDA kernel execution failed");
-
-        Rpow2CudaDeviceResult host_result{};
-        check_cuda(cudaMemcpy(&host_result,
-                              device_result,
-                              sizeof(host_result),
-                              cudaMemcpyDeviceToHost),
-                   "cudaMemcpy result failed");
-
-        Rpow2CudaBatchResult result;
-        result.found = host_result.found != 0u;
-        result.nonce = host_result.nonce;
-        result.attempts = static_cast<std::int64_t>(batch_size);
-        if (result.found) {
-            digest_words_to_bytes(host_result.digest_words, result.digest);
-        }
-        cudaFree(device_result);
-        cudaFree(device_template);
-        return result;
     } catch (...) {
-        if (device_result != nullptr) {
-            cudaFree(device_result);
+        if (device_result_ != nullptr) {
+            cudaFree(device_result_);
+            device_result_ = nullptr;
         }
-        if (device_template != nullptr) {
-            cudaFree(device_template);
+        if (device_template_ != nullptr) {
+            cudaFree(device_template_);
+            device_template_ = nullptr;
         }
         throw;
     }
+}
+
+Rpow2CudaSession::~Rpow2CudaSession() {
+    if (device_result_ != nullptr) {
+        cudaFree(device_result_);
+        device_result_ = nullptr;
+    }
+    if (device_template_ != nullptr) {
+        cudaFree(device_template_);
+        device_template_ = nullptr;
+    }
+}
+
+Rpow2CudaBatchResult Rpow2CudaSession::mine_next_batch() {
+    if (std::numeric_limits<std::uint64_t>::max() - next_nonce_ < batch_size_) {
+        throw std::runtime_error("RPOW2 CUDA nonce range exhausted");
+    }
+    check_cuda(cudaSetDevice(device_index_), "cudaSetDevice failed");
+    check_cuda(cudaMemset(device_result_, 0, sizeof(Rpow2CudaDeviceResult)),
+               "cudaMemset result failed");
+
+    Rpow2CudaKernelParams params{};
+    params.prefix_len = prefix_len_;
+    params.difficulty_bits = difficulty_bits_;
+    params.block_count = block_count_;
+    params.padding = 0;
+    params.start_nonce = static_cast<unsigned long long>(next_nonce_);
+    params.batch_size = static_cast<unsigned long long>(batch_size_);
+
+    constexpr unsigned int threads_per_block = 256;
+    const auto blocks = static_cast<unsigned int>(
+        (batch_size_ + threads_per_block - 1) / threads_per_block);
+    rpow2_mine_kernel<<<blocks, threads_per_block>>>(
+        static_cast<std::uint32_t*>(device_template_),
+        params,
+        static_cast<Rpow2CudaDeviceResult*>(device_result_));
+    check_cuda(cudaGetLastError(), "RPOW2 CUDA kernel launch failed");
+    check_cuda(cudaDeviceSynchronize(), "RPOW2 CUDA kernel execution failed");
+
+    Rpow2CudaDeviceResult host_result{};
+    check_cuda(cudaMemcpy(&host_result,
+                          device_result_,
+                          sizeof(host_result),
+                          cudaMemcpyDeviceToHost),
+               "cudaMemcpy result failed");
+
+    const auto max_attempts = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+    attempts_ = attempts_ > max_attempts - batch_size_ ? max_attempts : attempts_ + batch_size_;
+    next_nonce_ += batch_size_;
+
+    Rpow2CudaBatchResult result;
+    result.found = host_result.found != 0u;
+    result.nonce = host_result.nonce;
+    result.attempts = static_cast<std::int64_t>(attempts_);
+    if (result.found) {
+        digest_words_to_bytes(host_result.digest_words, result.digest);
+    }
+    return result;
+}
+
+Rpow2CudaBatchResult mine_rpow2_cuda_batch(std::size_t device_index,
+                                           const std::uint8_t* nonce_prefix,
+                                           std::size_t nonce_prefix_len,
+                                           std::uint32_t difficulty_bits,
+                                           std::uint64_t batch_size,
+                                           std::uint64_t start_nonce) {
+    Rpow2CudaSession session(device_index,
+                             nonce_prefix,
+                             nonce_prefix_len,
+                             difficulty_bits,
+                             batch_size,
+                             start_nonce);
+    return session.mine_next_batch();
 }
 
 } // namespace app

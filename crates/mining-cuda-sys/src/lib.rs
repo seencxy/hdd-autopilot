@@ -83,6 +83,11 @@ pub struct mining_cuda_session {
     _private: [u8; 0],
 }
 
+#[repr(C)]
+pub struct mining_cuda_rpow2_session {
+    _private: [u8; 0],
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CudaSolverConfig {
     pub batch_size: usize,
@@ -153,7 +158,12 @@ pub struct CudaMiningSession {
     raw: *mut mining_cuda_session,
 }
 
+pub struct Rpow2CudaMiningSession {
+    raw: *mut mining_cuda_rpow2_session,
+}
+
 unsafe impl Send for CudaMiningSession {}
+unsafe impl Send for Rpow2CudaMiningSession {}
 
 unsafe extern "C" {
     fn mining_cuda_is_available() -> bool;
@@ -198,6 +208,17 @@ unsafe extern "C" {
         start_nonce: u64,
         result: *mut mining_cuda_rpow2_mine_result,
     ) -> bool;
+    fn mining_cuda_rpow2_session_create(
+        device_index: usize,
+        job: *const mining_cuda_rpow2_job,
+        config: *const mining_cuda_rpow2_solver_config,
+        start_nonce: u64,
+    ) -> *mut mining_cuda_rpow2_session;
+    fn mining_cuda_rpow2_session_mine_next_batch(
+        session: *mut mining_cuda_rpow2_session,
+        result: *mut mining_cuda_rpow2_mine_result,
+    ) -> bool;
+    fn mining_cuda_rpow2_session_destroy(session: *mut mining_cuda_rpow2_session);
     fn mining_argon2id_hash_raw(
         password_ptr: *const u8,
         password_len: usize,
@@ -472,6 +493,37 @@ pub fn rpow2_mine_batch(
     }
 }
 
+pub fn rpow2_create_session(
+    device_index: usize,
+    job: &Rpow2CudaJob<'_>,
+    config: Rpow2CudaSolverConfig,
+    start_nonce: u64,
+) -> Result<Rpow2CudaMiningSession, String> {
+    #[cfg(not(mining_cuda_native_enabled))]
+    {
+        let _ = (device_index, job, config, start_nonce);
+        Err("CUDA backend is not enabled on this platform.".to_string())
+    }
+    #[cfg(mining_cuda_native_enabled)]
+    unsafe {
+        let raw_job = mining_cuda_rpow2_job {
+            nonce_prefix_ptr: job.nonce_prefix.as_ptr(),
+            nonce_prefix_len: job.nonce_prefix.len(),
+            difficulty_bits: job.difficulty_bits,
+        };
+        let raw_config = mining_cuda_rpow2_solver_config {
+            batch_size: config.batch_size,
+        };
+        let raw =
+            mining_cuda_rpow2_session_create(device_index, &raw_job, &raw_config, start_nonce);
+        if raw.is_null() {
+            Err(last_error_message())
+        } else {
+            Ok(Rpow2CudaMiningSession { raw })
+        }
+    }
+}
+
 pub fn create_session(
     device_index: usize,
     job: &CudaJob<'_>,
@@ -544,12 +596,58 @@ impl CudaMiningSession {
     }
 }
 
+impl Rpow2CudaMiningSession {
+    pub fn mine_next_batch(&mut self) -> Result<Rpow2CudaMineResult, String> {
+        #[cfg(not(mining_cuda_native_enabled))]
+        {
+            Err("CUDA backend is not enabled on this platform.".to_string())
+        }
+        #[cfg(mining_cuda_native_enabled)]
+        unsafe {
+            let mut raw_result = mining_cuda_rpow2_mine_result {
+                found: false,
+                nonce: 0,
+                attempts: 0,
+                digest_hex: [0; 65],
+            };
+            if !mining_cuda_rpow2_session_mine_next_batch(self.raw, &mut raw_result) {
+                return Err(last_error_message());
+            }
+            let digest_len = raw_result
+                .digest_hex
+                .iter()
+                .position(|byte| *byte == 0)
+                .unwrap_or(raw_result.digest_hex.len());
+            let digest_hex =
+                String::from_utf8_lossy(&raw_result.digest_hex[..digest_len]).to_string();
+            Ok(Rpow2CudaMineResult {
+                found: raw_result.found,
+                nonce: raw_result.nonce,
+                attempts: raw_result.attempts,
+                digest_hex,
+            })
+        }
+    }
+}
+
 impl Drop for CudaMiningSession {
     fn drop(&mut self) {
         #[cfg(mining_cuda_native_enabled)]
         unsafe {
             if !self.raw.is_null() {
                 mining_cuda_session_destroy(self.raw);
+                self.raw = std::ptr::null_mut();
+            }
+        }
+    }
+}
+
+impl Drop for Rpow2CudaMiningSession {
+    fn drop(&mut self) {
+        #[cfg(mining_cuda_native_enabled)]
+        unsafe {
+            if !self.raw.is_null() {
+                mining_cuda_rpow2_session_destroy(self.raw);
                 self.raw = std::ptr::null_mut();
             }
         }

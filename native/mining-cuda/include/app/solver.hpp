@@ -56,6 +56,36 @@ struct Rpow2CudaBatchResult {
     std::array<std::uint8_t, 32> digest{};
 };
 
+class Rpow2CudaSession {
+public:
+    Rpow2CudaSession(
+        std::size_t device_index,
+        const std::uint8_t* nonce_prefix,
+        std::size_t nonce_prefix_len,
+        std::uint32_t difficulty_bits,
+        std::uint64_t batch_size,
+        std::uint64_t start_nonce);
+    ~Rpow2CudaSession();
+
+    Rpow2CudaSession(const Rpow2CudaSession&) = delete;
+    Rpow2CudaSession& operator=(const Rpow2CudaSession&) = delete;
+    Rpow2CudaSession(Rpow2CudaSession&&) = delete;
+    Rpow2CudaSession& operator=(Rpow2CudaSession&&) = delete;
+
+    Rpow2CudaBatchResult mine_next_batch();
+
+private:
+    int device_index_ = 0;
+    void* device_template_ = nullptr;
+    void* device_result_ = nullptr;
+    std::uint32_t prefix_len_ = 0;
+    std::uint32_t difficulty_bits_ = 0;
+    std::uint32_t block_count_ = 0;
+    std::uint64_t batch_size_ = 0;
+    std::uint64_t next_nonce_ = 0;
+    std::uint64_t attempts_ = 0;
+};
+
 class Solver {
 public:
     explicit Solver(std::size_t device_index);

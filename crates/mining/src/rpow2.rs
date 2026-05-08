@@ -13,8 +13,10 @@ use crate::{DEFAULT_USER_AGENT, MiningError};
 
 const CPU_ATTEMPT_FLUSH_INTERVAL: i64 = 4096;
 const AUTO_GPU_BATCH_SIZE: u64 = 0;
-const FALLBACK_GPU_BATCH_SIZE: u64 = 1 << 22;
-const GPU_AUTO_TUNE_BATCH_SIZES: [u64; 4] = [1 << 18, 1 << 20, 1 << 22, 1 << 24];
+const FALLBACK_CUDA_BATCH_SIZE: u64 = 1 << 28;
+const FALLBACK_METAL_BATCH_SIZE: u64 = 1 << 22;
+const CUDA_AUTO_TUNE_BATCH_SIZES: [u64; 4] = [1 << 24, 1 << 26, 1 << 28, 1 << 29];
+const METAL_AUTO_TUNE_BATCH_SIZES: [u64; 4] = [1 << 18, 1 << 20, 1 << 22, 1 << 24];
 const RPOW2_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -465,7 +467,7 @@ fn mine_rpow2_cuda(
     let batch_size = if batch_size == AUTO_GPU_BATCH_SIZE {
         let mut best_batch_size = 0u64;
         let mut best_hashes_per_second = 0.0f64;
-        for candidate_batch_size in GPU_AUTO_TUNE_BATCH_SIZES {
+        for candidate_batch_size in CUDA_AUTO_TUNE_BATCH_SIZES {
             if remaining == 0 {
                 break;
             }
@@ -497,7 +499,7 @@ fn mine_rpow2_cuda(
             remaining = remaining.saturating_sub(current_batch_size);
         }
         let selected = if best_batch_size == 0 {
-            FALLBACK_GPU_BATCH_SIZE
+            FALLBACK_CUDA_BATCH_SIZE
         } else {
             best_batch_size
         };
@@ -505,6 +507,32 @@ fn mine_rpow2_cuda(
     } else {
         batch_size.max(1)
     };
+
+    if remaining >= batch_size {
+        let attempts_before_session = attempts;
+        let mut session_attempts = 0i64;
+        let mut session = mining_cuda_sys::rpow2_create_session(
+            config.metal_device_index,
+            &raw_job,
+            mining_cuda_sys::Rpow2CudaSolverConfig { batch_size },
+            start_nonce,
+        )
+        .map_err(MiningError::Message)?;
+        while remaining >= batch_size {
+            if cancel.load(Ordering::SeqCst) {
+                return Err(crate::error::interrupted_error());
+            }
+            let result = session.mine_next_batch().map_err(MiningError::Message)?;
+            session_attempts = result.attempts;
+            let total_attempts = attempts_before_session.saturating_add(session_attempts);
+            if let Some(result) = verified_cuda_result(job, result, total_attempts)? {
+                return Ok(Some(result));
+            }
+            start_nonce = start_nonce.saturating_add(batch_size);
+            remaining = remaining.saturating_sub(batch_size);
+        }
+        attempts = attempts_before_session.saturating_add(session_attempts);
+    }
 
     while remaining > 0 {
         if cancel.load(Ordering::SeqCst) {
@@ -576,7 +604,7 @@ fn mine_rpow2_metal(
     let batch_size = if batch_size == AUTO_GPU_BATCH_SIZE {
         let mut best_batch_size = 0u64;
         let mut best_hashes_per_second = 0.0f64;
-        for candidate_batch_size in GPU_AUTO_TUNE_BATCH_SIZES {
+        for candidate_batch_size in METAL_AUTO_TUNE_BATCH_SIZES {
             if remaining == 0 {
                 break;
             }
@@ -609,7 +637,7 @@ fn mine_rpow2_metal(
             remaining = remaining.saturating_sub(current_batch_size);
         }
         let selected = if best_batch_size == 0 {
-            FALLBACK_GPU_BATCH_SIZE
+            FALLBACK_METAL_BATCH_SIZE
         } else {
             best_batch_size
         };
