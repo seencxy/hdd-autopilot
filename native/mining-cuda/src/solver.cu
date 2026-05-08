@@ -479,17 +479,31 @@ __device__ std::uint32_t rpow2_trailing_zero_bits(std::uint32_t h0,
                                                   std::uint32_t h5,
                                                   std::uint32_t h6,
                                                   std::uint32_t h7) {
-    std::uint32_t words[8] = {h0, h1, h2, h3, h4, h5, h6, h7};
-    std::uint32_t bits = 0;
-    for (int i = 7; i >= 0; --i) {
-        const std::uint32_t word = words[i];
-        if (word == 0) {
-            bits += 32;
-            continue;
-        }
-        return bits + static_cast<std::uint32_t>(__ffs(word) - 1);
+    if (h7 != 0) {
+        return static_cast<std::uint32_t>(__ffs(h7) - 1);
     }
-    return bits;
+    if (h6 != 0) {
+        return 32u + static_cast<std::uint32_t>(__ffs(h6) - 1);
+    }
+    if (h5 != 0) {
+        return 64u + static_cast<std::uint32_t>(__ffs(h5) - 1);
+    }
+    if (h4 != 0) {
+        return 96u + static_cast<std::uint32_t>(__ffs(h4) - 1);
+    }
+    if (h3 != 0) {
+        return 128u + static_cast<std::uint32_t>(__ffs(h3) - 1);
+    }
+    if (h2 != 0) {
+        return 160u + static_cast<std::uint32_t>(__ffs(h2) - 1);
+    }
+    if (h1 != 0) {
+        return 192u + static_cast<std::uint32_t>(__ffs(h1) - 1);
+    }
+    if (h0 != 0) {
+        return 224u + static_cast<std::uint32_t>(__ffs(h0) - 1);
+    }
+    return 256u;
 }
 
 __global__ void rpow2_mine_kernel(const std::uint32_t* template_words,
@@ -513,20 +527,11 @@ __global__ void rpow2_mine_kernel(const std::uint32_t* template_words,
     std::uint32_t h7 = 0x5be0cd19;
 
     for (std::uint32_t block = 0; block < params.block_count; ++block) {
-        std::uint32_t w[64];
+        std::uint32_t w[16];
         for (std::uint32_t i = 0; i < 16; ++i) {
             w[i] = template_words[block * 16u + i];
         }
         rpow2_write_nonce_words(w, block, params.prefix_len, nonce);
-        for (std::uint32_t i = 16; i < 64; ++i) {
-            const std::uint32_t s0 = rpow2_rotr32(w[i - 15], 7u)
-                ^ rpow2_rotr32(w[i - 15], 18u)
-                ^ (w[i - 15] >> 3);
-            const std::uint32_t s1 = rpow2_rotr32(w[i - 2], 17u)
-                ^ rpow2_rotr32(w[i - 2], 19u)
-                ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16] + s0 + w[i - 7] + s1;
-        }
 
         std::uint32_t a = h0;
         std::uint32_t b = h1;
@@ -537,11 +542,24 @@ __global__ void rpow2_mine_kernel(const std::uint32_t* template_words,
         std::uint32_t g = h6;
         std::uint32_t h = h7;
         for (std::uint32_t i = 0; i < 64; ++i) {
+            std::uint32_t schedule_word = w[i & 15u];
+            if (i >= 16) {
+                const std::uint32_t w15 = w[(i + 1u) & 15u];
+                const std::uint32_t w2 = w[(i + 14u) & 15u];
+                const std::uint32_t s0 = rpow2_rotr32(w15, 7u)
+                    ^ rpow2_rotr32(w15, 18u)
+                    ^ (w15 >> 3);
+                const std::uint32_t s1 = rpow2_rotr32(w2, 17u)
+                    ^ rpow2_rotr32(w2, 19u)
+                    ^ (w2 >> 10);
+                schedule_word = schedule_word + s0 + w[(i + 9u) & 15u] + s1;
+                w[i & 15u] = schedule_word;
+            }
             const std::uint32_t s1 = rpow2_rotr32(e, 6u)
                 ^ rpow2_rotr32(e, 11u)
                 ^ rpow2_rotr32(e, 25u);
             const std::uint32_t ch = (e & f) ^ ((~e) & g);
-            const std::uint32_t temp1 = h + s1 + ch + kRpow2Sha256K[i] + w[i];
+            const std::uint32_t temp1 = h + s1 + ch + kRpow2Sha256K[i] + schedule_word;
             const std::uint32_t s0 = rpow2_rotr32(a, 2u)
                 ^ rpow2_rotr32(a, 13u)
                 ^ rpow2_rotr32(a, 22u);
