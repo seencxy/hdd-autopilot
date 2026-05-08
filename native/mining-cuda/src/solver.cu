@@ -651,6 +651,32 @@ __device__ std::uint32_t rpow2_trailing_zero_bits(std::uint32_t h0,
 		    }
 		}
 
+		__device__ __forceinline__ void rpow2_sha256_round_scalar(std::uint32_t& a,
+		                                                          std::uint32_t& b,
+		                                                          std::uint32_t& c,
+		                                                          std::uint32_t& d,
+		                                                          std::uint32_t& e,
+		                                                          std::uint32_t& f,
+		                                                          std::uint32_t& g,
+		                                                          std::uint32_t& h,
+		                                                          std::uint32_t schedule_word,
+		                                                          std::uint32_t round_constant) {
+		    const std::uint32_t temp1 = h
+		        + rpow2_big_sigma1(e)
+		        + rpow2_ch(e, f, g)
+		        + round_constant
+		        + schedule_word;
+		    const std::uint32_t temp2 = rpow2_big_sigma0(a) + rpow2_maj(a, b, c);
+		    h = g;
+		    g = f;
+		    f = e;
+		    e = d + temp1;
+		    d = c;
+		    c = b;
+		    b = a;
+		    a = temp1 + temp2;
+		}
+
 		__device__ __forceinline__ void rpow2_hash_nonce_prefix16(const Rpow2CudaKernelParams& params,
 		                                                         unsigned long long nonce,
 		                                                         std::uint32_t* h0,
@@ -661,33 +687,156 @@ __device__ std::uint32_t rpow2_trailing_zero_bits(std::uint32_t h0,
 		                                                         std::uint32_t* h5,
 		                                                         std::uint32_t* h6,
 		                                                         std::uint32_t* h7) {
-		    *h0 = 0x6a09e667;
-		    *h1 = 0xbb67ae85;
-		    *h2 = 0x3c6ef372;
-		    *h3 = 0xa54ff53a;
-		    *h4 = 0x510e527f;
-		    *h5 = 0x9b05688c;
-		    *h6 = 0x1f83d9ab;
-		    *h7 = 0x5be0cd19;
+		    std::uint32_t a = 0x6a09e667u;
+		    std::uint32_t b = 0xbb67ae85u;
+		    std::uint32_t c = 0x3c6ef372u;
+		    std::uint32_t d = 0xa54ff53au;
+		    std::uint32_t e = 0x510e527fu;
+		    std::uint32_t f = 0x9b05688cu;
+		    std::uint32_t g = 0x1f83d9abu;
+		    std::uint32_t h = 0x5be0cd19u;
+		    std::uint32_t w0 = params.template_words[0];
+		    std::uint32_t w1 = params.template_words[1];
+		    std::uint32_t w2 = params.template_words[2];
+		    std::uint32_t w3 = params.template_words[3];
+		    std::uint32_t w4 = rpow2_bswap32(static_cast<std::uint32_t>(nonce));
+		    std::uint32_t w5 = rpow2_bswap32(static_cast<std::uint32_t>(nonce >> 32));
+		    std::uint32_t w6 = 0x80000000u;
+		    std::uint32_t w7 = 0u;
+		    std::uint32_t w8 = 0u;
+		    std::uint32_t w9 = 0u;
+		    std::uint32_t w10 = 0u;
+		    std::uint32_t w11 = 0u;
+		    std::uint32_t w12 = 0u;
+		    std::uint32_t w13 = 0u;
+		    std::uint32_t w14 = 0u;
+		    std::uint32_t w15 = 192u;
 
-		    std::uint32_t w[16];
-		    w[0] = params.template_words[0];
-		    w[1] = params.template_words[1];
-		    w[2] = params.template_words[2];
-		    w[3] = params.template_words[3];
-		    w[4] = rpow2_bswap32(static_cast<std::uint32_t>(nonce));
-		    w[5] = rpow2_bswap32(static_cast<std::uint32_t>(nonce >> 32));
-		    w[6] = 0x80000000u;
-		    w[7] = 0u;
-		    w[8] = 0u;
-		    w[9] = 0u;
-		    w[10] = 0u;
-		    w[11] = 0u;
-		    w[12] = 0u;
-		    w[13] = 0u;
-		    w[14] = 0u;
-		    w[15] = 192u;
-		    rpow2_compress_block(h0, h1, h2, h3, h4, h5, h6, h7, w);
+#define RPOW2_ROUND(W, K) rpow2_sha256_round_scalar(a, b, c, d, e, f, g, h, W, K)
+#define RPOW2_EXPAND(W, W1, W9, W14) W = W + rpow2_small_sigma0(W1) + W9 + rpow2_small_sigma1(W14)
+		    RPOW2_ROUND(w0, 0x428a2f98u);
+		    RPOW2_ROUND(w1, 0x71374491u);
+		    RPOW2_ROUND(w2, 0xb5c0fbcfu);
+		    RPOW2_ROUND(w3, 0xe9b5dba5u);
+		    RPOW2_ROUND(w4, 0x3956c25bu);
+		    RPOW2_ROUND(w5, 0x59f111f1u);
+		    RPOW2_ROUND(w6, 0x923f82a4u);
+		    RPOW2_ROUND(w7, 0xab1c5ed5u);
+		    RPOW2_ROUND(w8, 0xd807aa98u);
+		    RPOW2_ROUND(w9, 0x12835b01u);
+		    RPOW2_ROUND(w10, 0x243185beu);
+		    RPOW2_ROUND(w11, 0x550c7dc3u);
+		    RPOW2_ROUND(w12, 0x72be5d74u);
+		    RPOW2_ROUND(w13, 0x80deb1feu);
+		    RPOW2_ROUND(w14, 0x9bdc06a7u);
+		    RPOW2_ROUND(w15, 0xc19bf174u);
+		    RPOW2_EXPAND(w0, w1, w9, w14);
+		    RPOW2_ROUND(w0, 0xe49b69c1u);
+		    RPOW2_EXPAND(w1, w2, w10, w15);
+		    RPOW2_ROUND(w1, 0xefbe4786u);
+		    RPOW2_EXPAND(w2, w3, w11, w0);
+		    RPOW2_ROUND(w2, 0x0fc19dc6u);
+		    RPOW2_EXPAND(w3, w4, w12, w1);
+		    RPOW2_ROUND(w3, 0x240ca1ccu);
+		    RPOW2_EXPAND(w4, w5, w13, w2);
+		    RPOW2_ROUND(w4, 0x2de92c6fu);
+		    RPOW2_EXPAND(w5, w6, w14, w3);
+		    RPOW2_ROUND(w5, 0x4a7484aau);
+		    RPOW2_EXPAND(w6, w7, w15, w4);
+		    RPOW2_ROUND(w6, 0x5cb0a9dcu);
+		    RPOW2_EXPAND(w7, w8, w0, w5);
+		    RPOW2_ROUND(w7, 0x76f988dau);
+		    RPOW2_EXPAND(w8, w9, w1, w6);
+		    RPOW2_ROUND(w8, 0x983e5152u);
+		    RPOW2_EXPAND(w9, w10, w2, w7);
+		    RPOW2_ROUND(w9, 0xa831c66du);
+		    RPOW2_EXPAND(w10, w11, w3, w8);
+		    RPOW2_ROUND(w10, 0xb00327c8u);
+		    RPOW2_EXPAND(w11, w12, w4, w9);
+		    RPOW2_ROUND(w11, 0xbf597fc7u);
+		    RPOW2_EXPAND(w12, w13, w5, w10);
+		    RPOW2_ROUND(w12, 0xc6e00bf3u);
+		    RPOW2_EXPAND(w13, w14, w6, w11);
+		    RPOW2_ROUND(w13, 0xd5a79147u);
+		    RPOW2_EXPAND(w14, w15, w7, w12);
+		    RPOW2_ROUND(w14, 0x06ca6351u);
+		    RPOW2_EXPAND(w15, w0, w8, w13);
+		    RPOW2_ROUND(w15, 0x14292967u);
+		    RPOW2_EXPAND(w0, w1, w9, w14);
+		    RPOW2_ROUND(w0, 0x27b70a85u);
+		    RPOW2_EXPAND(w1, w2, w10, w15);
+		    RPOW2_ROUND(w1, 0x2e1b2138u);
+		    RPOW2_EXPAND(w2, w3, w11, w0);
+		    RPOW2_ROUND(w2, 0x4d2c6dfcu);
+		    RPOW2_EXPAND(w3, w4, w12, w1);
+		    RPOW2_ROUND(w3, 0x53380d13u);
+		    RPOW2_EXPAND(w4, w5, w13, w2);
+		    RPOW2_ROUND(w4, 0x650a7354u);
+		    RPOW2_EXPAND(w5, w6, w14, w3);
+		    RPOW2_ROUND(w5, 0x766a0abbu);
+		    RPOW2_EXPAND(w6, w7, w15, w4);
+		    RPOW2_ROUND(w6, 0x81c2c92eu);
+		    RPOW2_EXPAND(w7, w8, w0, w5);
+		    RPOW2_ROUND(w7, 0x92722c85u);
+		    RPOW2_EXPAND(w8, w9, w1, w6);
+		    RPOW2_ROUND(w8, 0xa2bfe8a1u);
+		    RPOW2_EXPAND(w9, w10, w2, w7);
+		    RPOW2_ROUND(w9, 0xa81a664bu);
+		    RPOW2_EXPAND(w10, w11, w3, w8);
+		    RPOW2_ROUND(w10, 0xc24b8b70u);
+		    RPOW2_EXPAND(w11, w12, w4, w9);
+		    RPOW2_ROUND(w11, 0xc76c51a3u);
+		    RPOW2_EXPAND(w12, w13, w5, w10);
+		    RPOW2_ROUND(w12, 0xd192e819u);
+		    RPOW2_EXPAND(w13, w14, w6, w11);
+		    RPOW2_ROUND(w13, 0xd6990624u);
+		    RPOW2_EXPAND(w14, w15, w7, w12);
+		    RPOW2_ROUND(w14, 0xf40e3585u);
+		    RPOW2_EXPAND(w15, w0, w8, w13);
+		    RPOW2_ROUND(w15, 0x106aa070u);
+		    RPOW2_EXPAND(w0, w1, w9, w14);
+		    RPOW2_ROUND(w0, 0x19a4c116u);
+		    RPOW2_EXPAND(w1, w2, w10, w15);
+		    RPOW2_ROUND(w1, 0x1e376c08u);
+		    RPOW2_EXPAND(w2, w3, w11, w0);
+		    RPOW2_ROUND(w2, 0x2748774cu);
+		    RPOW2_EXPAND(w3, w4, w12, w1);
+		    RPOW2_ROUND(w3, 0x34b0bcb5u);
+		    RPOW2_EXPAND(w4, w5, w13, w2);
+		    RPOW2_ROUND(w4, 0x391c0cb3u);
+		    RPOW2_EXPAND(w5, w6, w14, w3);
+		    RPOW2_ROUND(w5, 0x4ed8aa4au);
+		    RPOW2_EXPAND(w6, w7, w15, w4);
+		    RPOW2_ROUND(w6, 0x5b9cca4fu);
+		    RPOW2_EXPAND(w7, w8, w0, w5);
+		    RPOW2_ROUND(w7, 0x682e6ff3u);
+		    RPOW2_EXPAND(w8, w9, w1, w6);
+		    RPOW2_ROUND(w8, 0x748f82eeu);
+		    RPOW2_EXPAND(w9, w10, w2, w7);
+		    RPOW2_ROUND(w9, 0x78a5636fu);
+		    RPOW2_EXPAND(w10, w11, w3, w8);
+		    RPOW2_ROUND(w10, 0x84c87814u);
+		    RPOW2_EXPAND(w11, w12, w4, w9);
+		    RPOW2_ROUND(w11, 0x8cc70208u);
+		    RPOW2_EXPAND(w12, w13, w5, w10);
+		    RPOW2_ROUND(w12, 0x90befffau);
+		    RPOW2_EXPAND(w13, w14, w6, w11);
+		    RPOW2_ROUND(w13, 0xa4506cebu);
+		    RPOW2_EXPAND(w14, w15, w7, w12);
+		    RPOW2_ROUND(w14, 0xbef9a3f7u);
+		    RPOW2_EXPAND(w15, w0, w8, w13);
+		    RPOW2_ROUND(w15, 0xc67178f2u);
+#undef RPOW2_ROUND
+#undef RPOW2_EXPAND
+
+		    *h0 = 0x6a09e667u + a;
+		    *h1 = 0xbb67ae85u + b;
+		    *h2 = 0x3c6ef372u + c;
+		    *h3 = 0xa54ff53au + d;
+		    *h4 = 0x510e527fu + e;
+		    *h5 = 0x9b05688cu + f;
+		    *h6 = 0x1f83d9abu + g;
+		    *h7 = 0x5be0cd19u + h;
 		}
 
 		template <unsigned int NoncesPerThread>
