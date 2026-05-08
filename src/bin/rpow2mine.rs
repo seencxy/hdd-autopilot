@@ -70,7 +70,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "found solution_nonce={} digest={} backend={:?} attempts={}",
             result.nonce, result.digest_hex, result.backend, result.attempts
         );
-        let mint = client.mint(challenge.challenge_id, result.nonce)?;
+        let mint = client.mint(&challenge.challenge_id, result.nonce)?;
         println!("mint: {}", mint);
         if !args.loop_forever {
             break;

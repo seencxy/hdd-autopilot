@@ -138,7 +138,7 @@ impl Rpow2Job {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Rpow2Challenge {
-    pub challenge_id: i64,
+    pub challenge_id: String,
     pub nonce_prefix: String,
     pub difficulty_bits: u32,
 }
@@ -196,10 +196,10 @@ impl Rpow2Client {
         self.post_json_without_body("/challenge")
     }
 
-    pub fn mint(&self, challenge_id: i64, solution_nonce: u64) -> Result<Value, MiningError> {
+    pub fn mint(&self, challenge_id: &str, solution_nonce: u64) -> Result<Value, MiningError> {
         #[derive(Serialize)]
-        struct MintRequest {
-            challenge_id: i64,
+        struct MintRequest<'a> {
+            challenge_id: &'a str,
             solution_nonce: String,
         }
 
