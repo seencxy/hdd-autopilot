@@ -16,7 +16,7 @@ use mining::rpow2::{
 use rand as _;
 use reqwest as _;
 use serde as _;
-use serde_json as _;
+use serde_json::{Value, json};
 use time as _;
 use unicode_width as _;
 use url as _;
@@ -73,9 +73,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "found solution_nonce={} digest={} backend={:?} attempts={}",
             result.nonce, result.digest_hex, result.backend, result.attempts
         );
-        let mint = retry_online("mint", || {
-            client.mint(&challenge.challenge_id, result.nonce)
-        })?;
+        let mint = mint_with_recovery(&client, &challenge.challenge_id, result.nonce)?;
         println!("mint: {}", mint);
         if !args.loop_forever {
             break;
@@ -117,6 +115,42 @@ fn solve_job(
     };
     println!("{} speed: {:.2} H/s", backend, speed);
     Ok(result)
+}
+
+fn mint_with_recovery(
+    client: &Rpow2Client,
+    challenge_id: &str,
+    solution_nonce: u64,
+) -> Result<Value, MiningError> {
+    let mut attempt = 1u32;
+    loop {
+        match client.mint(challenge_id, solution_nonce) {
+            Ok(value) => return Ok(value),
+            Err(error) if is_already_claimed_error(&error) => {
+                eprintln!(
+                    "mint already claimed for challenge={}; treating as accepted",
+                    challenge_id
+                );
+                return Ok(json!({
+                    "status": "already_claimed",
+                    "challenge_id": challenge_id,
+                    "solution_nonce": solution_nonce.to_string()
+                }));
+            }
+            Err(error) if is_retryable_online_error(&error) => {
+                let delay = retry_delay(attempt);
+                eprintln!(
+                    "mint request failed on attempt {}: {}; retrying in {}s",
+                    attempt,
+                    error_chain_to_string(&error),
+                    delay.as_secs()
+                );
+                thread::sleep(delay);
+                attempt = attempt.saturating_add(1);
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn default_gpu_batch_size() -> u64 {
@@ -196,6 +230,13 @@ fn retryable_status_message(message: &str) -> bool {
     [408, 425, 429, 500, 502, 503, 504]
         .into_iter()
         .any(|status| message.contains(&format!("状态码 {status}")))
+}
+
+fn is_already_claimed_error(error: &MiningError) -> bool {
+    match error {
+        MiningError::Message(message) => message.to_ascii_lowercase().contains("already claimed"),
+        _ => false,
+    }
 }
 
 fn print_error_chain(error: &(dyn Error + 'static)) {
