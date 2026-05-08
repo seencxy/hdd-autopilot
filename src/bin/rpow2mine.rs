@@ -93,7 +93,7 @@ fn solve_job(
     let config = Rpow2MineConfig {
         prefer_gpu: !args.cpu_only,
         metal_device_index: args.gpu_device_index.unwrap_or(0),
-        metal_batch_size: args.gpu_batch_size.unwrap_or(0),
+        metal_batch_size: args.gpu_batch_size.unwrap_or_else(default_gpu_batch_size),
         cpu_threads: args.cpu_threads.unwrap_or_else(|| {
             std::thread::available_parallelism()
                 .map(usize::from)
@@ -101,6 +101,13 @@ fn solve_job(
         }),
         ..Rpow2MineConfig::default()
     };
+    if !args.cpu_only {
+        println!(
+            "gpu_device={} gpu_batch_size={}",
+            config.metal_device_index,
+            gpu_batch_label(config.metal_batch_size)
+        );
+    }
     let result = mine_rpow2(job, config, &cancel)?;
     let speed = result.attempts as f64 / started.elapsed().as_secs_f64().max(0.001);
     let backend = match result.backend {
@@ -110,6 +117,25 @@ fn solve_job(
     };
     println!("{} speed: {:.2} H/s", backend, speed);
     Ok(result)
+}
+
+fn default_gpu_batch_size() -> u64 {
+    #[cfg(target_os = "windows")]
+    {
+        mining::rpow2::FULL_CUDA_BATCH_SIZE
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        0
+    }
+}
+
+fn gpu_batch_label(batch_size: u64) -> String {
+    if batch_size == 0 {
+        "auto".to_string()
+    } else {
+        batch_size.to_string()
+    }
 }
 
 fn retry_online<T, F>(label: &str, mut operation: F) -> Result<T, MiningError>
@@ -265,7 +291,8 @@ Environment:
   RPOW2_COOKIE   Cookie header copied from an authenticated rpow2.com browser session
 
 Notes:
-  --gpu-batch-size 0 enables automatic GPU batch tuning and is the default
-  Windows GPU mining uses CUDA; macOS GPU mining uses Metal"
+  Windows GPU mining uses CUDA and defaults to a full-size 2147483648 hash batch
+  --gpu-batch-size 0 enables automatic GPU batch tuning
+  macOS GPU mining uses Metal"
     );
 }

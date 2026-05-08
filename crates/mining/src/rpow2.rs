@@ -13,9 +13,10 @@ use crate::{DEFAULT_USER_AGENT, MiningError};
 
 const CPU_ATTEMPT_FLUSH_INTERVAL: i64 = 4096;
 const AUTO_GPU_BATCH_SIZE: u64 = 0;
-const FALLBACK_CUDA_BATCH_SIZE: u64 = 1 << 28;
+pub const FULL_CUDA_BATCH_SIZE: u64 = 1 << 31;
+const FALLBACK_CUDA_BATCH_SIZE: u64 = FULL_CUDA_BATCH_SIZE;
 const FALLBACK_METAL_BATCH_SIZE: u64 = 1 << 22;
-const CUDA_AUTO_TUNE_BATCH_SIZES: [u64; 4] = [1 << 24, 1 << 26, 1 << 28, 1 << 29];
+const CUDA_AUTO_TUNE_BATCH_SIZES: [u64; 4] = [1 << 26, 1 << 28, 1 << 30, FULL_CUDA_BATCH_SIZE];
 const METAL_AUTO_TUNE_BATCH_SIZES: [u64; 4] = [1 << 18, 1 << 20, 1 << 22, 1 << 24];
 const RPOW2_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
