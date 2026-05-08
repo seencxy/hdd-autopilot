@@ -1,12 +1,15 @@
 use std::env;
+use std::error::Error;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::Instant;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crossterm as _;
 use hdd_autopilot as _;
 #[cfg(not(target_os = "macos"))]
 use iana_time_zone as _;
+use mining::MiningError;
 use mining::rpow2::{
     Rpow2Backend, Rpow2Client, Rpow2Job, Rpow2MineConfig, mine_rpow2, rpow2_meets_difficulty,
 };
@@ -20,7 +23,7 @@ use url as _;
 
 fn main() {
     if let Err(error) = run() {
-        eprintln!("rpow2mine: {}", error);
+        print_error_chain(error.as_ref());
         std::process::exit(1);
     }
 }
@@ -59,7 +62,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     loop {
-        let challenge = client.challenge()?;
+        let challenge = retry_online("challenge", || client.challenge())?;
         println!(
             "challenge={} difficulty={} prefix={}",
             challenge.challenge_id, challenge.difficulty_bits, challenge.nonce_prefix
@@ -70,7 +73,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "found solution_nonce={} digest={} backend={:?} attempts={}",
             result.nonce, result.digest_hex, result.backend, result.attempts
         );
-        let mint = client.mint(&challenge.challenge_id, result.nonce)?;
+        let mint = retry_online("mint", || {
+            client.mint(&challenge.challenge_id, result.nonce)
+        })?;
         println!("mint: {}", mint);
         if !args.loop_forever {
             break;
@@ -105,6 +110,80 @@ fn solve_job(
     };
     println!("{} speed: {:.2} H/s", backend, speed);
     Ok(result)
+}
+
+fn retry_online<T, F>(label: &str, mut operation: F) -> Result<T, MiningError>
+where
+    F: FnMut() -> Result<T, MiningError>,
+{
+    let mut attempt = 1u32;
+    loop {
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(error) if is_retryable_online_error(&error) => {
+                let delay = retry_delay(attempt);
+                eprintln!(
+                    "{} request failed on attempt {}: {}; retrying in {}s",
+                    label,
+                    attempt,
+                    error_chain_to_string(&error),
+                    delay.as_secs()
+                );
+                thread::sleep(delay);
+                attempt = attempt.saturating_add(1);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn retry_delay(attempt: u32) -> Duration {
+    match attempt {
+        0 | 1 => Duration::from_secs(1),
+        2 => Duration::from_secs(2),
+        3 => Duration::from_secs(4),
+        4 => Duration::from_secs(8),
+        _ => Duration::from_secs(15),
+    }
+}
+
+fn is_retryable_online_error(error: &MiningError) -> bool {
+    match error {
+        MiningError::Http(error) => {
+            error.is_timeout()
+                || error.is_connect()
+                || error.is_request()
+                || error.is_body()
+                || error.status().is_some_and(|status| {
+                    status.as_u16() == 408
+                        || status.as_u16() == 425
+                        || status.as_u16() == 429
+                        || status.is_server_error()
+                })
+        }
+        MiningError::Message(message) => retryable_status_message(message),
+        _ => false,
+    }
+}
+
+fn retryable_status_message(message: &str) -> bool {
+    [408, 425, 429, 500, 502, 503, 504]
+        .into_iter()
+        .any(|status| message.contains(&format!("状态码 {status}")))
+}
+
+fn print_error_chain(error: &(dyn Error + 'static)) {
+    eprintln!("rpow2mine: {}", error_chain_to_string(error));
+}
+
+fn error_chain_to_string(error: &(dyn Error + 'static)) -> String {
+    let mut parts = vec![error.to_string()];
+    let mut source = error.source();
+    while let Some(error) = source {
+        parts.push(error.to_string());
+        source = error.source();
+    }
+    parts.join(": ")
 }
 
 #[derive(Debug, Default)]

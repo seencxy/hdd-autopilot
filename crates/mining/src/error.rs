@@ -33,7 +33,16 @@ impl std::fmt::Display for MiningError {
     }
 }
 
-impl std::error::Error for MiningError {}
+impl std::error::Error for MiningError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::Http(error) => Some(error),
+            Self::Json(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 impl From<io::Error> for MiningError {
     fn from(value: io::Error) -> Self {
