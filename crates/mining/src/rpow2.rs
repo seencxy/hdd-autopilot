@@ -5,6 +5,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use reqwest::Proxy;
+use reqwest::Url;
 use reqwest::blocking::Client;
 use reqwest::header::{COOKIE, HeaderMap, HeaderValue, USER_AGENT};
 use serde::{Deserialize, Serialize};
@@ -252,7 +253,7 @@ impl Rpow2Client {
             .timeout(RPOW2_HTTP_TIMEOUT)
             .connect_timeout(RPOW2_HTTP_TIMEOUT);
         if let Some(proxy_url) = proxy_url.map(str::trim).filter(|proxy| !proxy.is_empty()) {
-            builder = builder.proxy(Proxy::all(proxy_url)?);
+            builder = builder.proxy(build_proxy(proxy_url)?);
         }
         Ok(Self {
             base_url: base_url.trim().trim_end_matches('/').to_string(),
@@ -319,6 +320,25 @@ impl Rpow2Client {
             .send()?;
         decode_response(response)
     }
+}
+
+fn build_proxy(proxy_url: &str) -> Result<Proxy, MiningError> {
+    let parsed = Url::parse(proxy_url)
+        .map_err(|error| MiningError::Message(format!("RPOW2 代理 URL 格式无效：{}", error)))?;
+    let username = parsed.username().to_string();
+    let password = parsed.password().map(str::to_string);
+    if username.is_empty() && password.is_none() {
+        return Ok(Proxy::all(proxy_url)?);
+    }
+
+    let mut proxy_endpoint = parsed;
+    proxy_endpoint
+        .set_username("")
+        .map_err(|_| MiningError::Message("RPOW2 代理 URL 用户名格式无效。".to_string()))?;
+    proxy_endpoint
+        .set_password(None)
+        .map_err(|_| MiningError::Message("RPOW2 代理 URL 密码格式无效。".to_string()))?;
+    Ok(Proxy::all(proxy_endpoint)?.basic_auth(&username, password.as_deref().unwrap_or("")))
 }
 
 pub fn mine_rpow2(
