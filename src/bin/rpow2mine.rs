@@ -56,7 +56,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|| env::var("RPOW2_COOKIE").ok())
         .or_else(|| env::var("RPOW_COOKIE").ok())
         .ok_or("missing RPOW2 cookie; pass --cookie or set RPOW2_COOKIE/RPOW_COOKIE")?;
-    let client = Rpow2Client::new(Some(&cookie))?;
+    let proxy = args.proxy.clone().or_else(|| env::var("RPOW2_PROXY").ok());
+    let client = Rpow2Client::new_with_proxy(Some(&cookie), proxy.as_deref())?;
     if let Ok(me) = client.me() {
         println!("account: {}", me);
     }
@@ -426,6 +427,7 @@ fn error_chain_to_string(error: &(dyn Error + 'static)) -> String {
 #[derive(Debug, Default)]
 struct Args {
     cookie: Option<String>,
+    proxy: Option<String>,
     prefix: Option<String>,
     difficulty_bits: Option<u32>,
     cpu_only: bool,
@@ -452,6 +454,10 @@ impl Args {
                 "--cookie" => {
                     index += 1;
                     args.cookie = Some(next_value(&raw, index, "--cookie")?.to_string());
+                }
+                "--proxy" => {
+                    index += 1;
+                    args.proxy = Some(next_value(&raw, index, "--proxy")?.to_string());
                 }
                 "--prefix" => {
                     index += 1;
@@ -532,12 +538,13 @@ fn next_value<'a>(
 fn print_usage() {
     println!(
         "Usage:
-  rpow2mine --cookie '<cookie-header>' [--loop] [--serial-api] [--cpu-only] [--gpu-device <index>] [--gpu-batch-size <hashes>] [--gpu-threads-per-block <n>] [--gpu-nonces-per-thread <n>] [--gpu-max-blocks <n>] [--gpu-no-early-exit] [--challenge-prefetch <n>] [--mint-workers <n>]
+  rpow2mine --cookie '<cookie-header>' [--proxy <url>] [--loop] [--serial-api] [--cpu-only] [--gpu-device <index>] [--gpu-batch-size <hashes>] [--gpu-threads-per-block <n>] [--gpu-nonces-per-thread <n>] [--gpu-max-blocks <n>] [--gpu-no-early-exit] [--challenge-prefetch <n>] [--mint-workers <n>]
   rpow2mine --prefix <hex> --difficulty <bits> [--cpu-only] [--gpu-device <index>] [--gpu-batch-size <hashes>]
 
 Environment:
   RPOW2_COOKIE   Cookie header copied from an authenticated rpow2.com browser session
   RPOW_COOKIE    Compatible alias used by other rpow2 GPU miners
+  RPOW2_PROXY    HTTP/HTTPS proxy URL for RPOW2 API requests
 
 Notes:
   Windows GPU mining uses CUDA and defaults to batch 268435456, 512 threads/block, 4 nonces/thread

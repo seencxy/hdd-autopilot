@@ -4,6 +4,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use reqwest::Proxy;
 use reqwest::blocking::Client;
 use reqwest::header::{COOKIE, HeaderMap, HeaderValue, USER_AGENT};
 use serde::{Deserialize, Serialize};
@@ -214,10 +215,25 @@ pub struct Rpow2Client {
 
 impl Rpow2Client {
     pub fn new(cookie_header: Option<&str>) -> Result<Self, MiningError> {
-        Self::with_base_url("https://api.rpow2.com", cookie_header)
+        Self::new_with_proxy(cookie_header, None)
+    }
+
+    pub fn new_with_proxy(
+        cookie_header: Option<&str>,
+        proxy_url: Option<&str>,
+    ) -> Result<Self, MiningError> {
+        Self::with_base_url_and_proxy("https://api.rpow2.com", cookie_header, proxy_url)
     }
 
     pub fn with_base_url(base_url: &str, cookie_header: Option<&str>) -> Result<Self, MiningError> {
+        Self::with_base_url_and_proxy(base_url, cookie_header, None)
+    }
+
+    pub fn with_base_url_and_proxy(
+        base_url: &str,
+        cookie_header: Option<&str>,
+        proxy_url: Option<&str>,
+    ) -> Result<Self, MiningError> {
         let mut headers = HeaderMap::new();
         headers.insert(USER_AGENT, HeaderValue::from_static(DEFAULT_USER_AGENT));
         if let Some(cookie_header) = cookie_header {
@@ -231,13 +247,16 @@ impl Rpow2Client {
                 );
             }
         }
+        let mut builder = Client::builder()
+            .default_headers(headers)
+            .timeout(RPOW2_HTTP_TIMEOUT)
+            .connect_timeout(RPOW2_HTTP_TIMEOUT);
+        if let Some(proxy_url) = proxy_url.map(str::trim).filter(|proxy| !proxy.is_empty()) {
+            builder = builder.proxy(Proxy::all(proxy_url)?);
+        }
         Ok(Self {
             base_url: base_url.trim().trim_end_matches('/').to_string(),
-            http_client: Client::builder()
-                .default_headers(headers)
-                .timeout(RPOW2_HTTP_TIMEOUT)
-                .connect_timeout(RPOW2_HTTP_TIMEOUT)
-                .build()?,
+            http_client: builder.build()?,
         })
     }
 
