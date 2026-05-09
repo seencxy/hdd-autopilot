@@ -54,7 +54,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .cookie
         .clone()
         .or_else(|| env::var("RPOW2_COOKIE").ok())
-        .ok_or("missing RPOW2 cookie; pass --cookie or set RPOW2_COOKIE")?;
+        .or_else(|| env::var("RPOW_COOKIE").ok())
+        .ok_or("missing RPOW2 cookie; pass --cookie or set RPOW2_COOKIE/RPOW_COOKIE")?;
     let client = Rpow2Client::new(Some(&cookie))?;
     if let Ok(me) = client.me() {
         println!("account: {}", me);
@@ -64,7 +65,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if args.loop_forever {
-        run_pipelined_loop(&client, &args)?;
+        if args.serial_api {
+            run_serial_loop(&client, &args)?;
+        } else {
+            run_pipelined_loop(&client, &args)?;
+        }
     } else {
         run_single_round(&client, &args)?;
     }
@@ -77,6 +82,13 @@ fn run_single_round(client: &Rpow2Client, args: &Args) -> Result<(), Box<dyn std
     let mint = mint_with_recovery(client, &challenge.challenge_id, result.nonce)?;
     println!("mint: {}", mint);
     Ok(())
+}
+
+fn run_serial_loop(client: &Rpow2Client, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    println!("api_mode=serial");
+    loop {
+        run_single_round(client, args)?;
+    }
 }
 
 fn run_pipelined_loop(client: &Rpow2Client, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
@@ -428,6 +440,7 @@ struct Args {
     gpu_no_early_exit: bool,
     challenge_prefetch: Option<usize>,
     mint_workers: Option<usize>,
+    serial_api: bool,
 }
 
 impl Args {
@@ -482,6 +495,9 @@ impl Args {
                 "--gpu-no-early-exit" | "--cuda-no-early-exit" => {
                     args.gpu_no_early_exit = true;
                 }
+                "--serial-api" | "--no-pipeline" => {
+                    args.serial_api = true;
+                }
                 "--challenge-prefetch" => {
                     index += 1;
                     args.challenge_prefetch =
@@ -516,17 +532,19 @@ fn next_value<'a>(
 fn print_usage() {
     println!(
         "Usage:
-  rpow2mine --cookie '<cookie-header>' [--loop] [--cpu-only] [--gpu-device <index>] [--gpu-batch-size <hashes>] [--gpu-threads-per-block <n>] [--gpu-nonces-per-thread <n>] [--gpu-max-blocks <n>] [--gpu-no-early-exit] [--challenge-prefetch <n>] [--mint-workers <n>]
+  rpow2mine --cookie '<cookie-header>' [--loop] [--serial-api] [--cpu-only] [--gpu-device <index>] [--gpu-batch-size <hashes>] [--gpu-threads-per-block <n>] [--gpu-nonces-per-thread <n>] [--gpu-max-blocks <n>] [--gpu-no-early-exit] [--challenge-prefetch <n>] [--mint-workers <n>]
   rpow2mine --prefix <hex> --difficulty <bits> [--cpu-only] [--gpu-device <index>] [--gpu-batch-size <hashes>]
 
 Environment:
   RPOW2_COOKIE   Cookie header copied from an authenticated rpow2.com browser session
+  RPOW_COOKIE    Compatible alias used by other rpow2 GPU miners
 
 Notes:
   Windows GPU mining uses CUDA and defaults to batch 268435456, 512 threads/block, 4 nonces/thread
   --gpu-batch-size 0 enables automatic GPU batch tuning
   --gpu-max-blocks 0 uses an SM-based automatic grid size
   --gpu-no-early-exit disables cross-thread stop checks inside a CUDA batch
+  --serial-api disables challenge prefetch and async mint submission for strict one-request-at-a-time API use
   --loop defaults to challenge prefetch 2 and mint workers 1 on Windows
   macOS GPU mining uses Metal"
     );
