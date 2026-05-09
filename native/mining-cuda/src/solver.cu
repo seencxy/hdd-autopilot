@@ -531,9 +531,9 @@ struct Rpow2CudaDeviceResult {
     }
 }
 
-__device__ std::uint32_t rpow2_trailing_zero_bits(std::uint32_t h0,
-                                                  std::uint32_t h1,
-                                                  std::uint32_t h2,
+	__device__ std::uint32_t rpow2_trailing_zero_bits(std::uint32_t h0,
+	                                                  std::uint32_t h1,
+	                                                  std::uint32_t h2,
                                                   std::uint32_t h3,
                                                   std::uint32_t h4,
                                                   std::uint32_t h5,
@@ -562,9 +562,30 @@ __device__ std::uint32_t rpow2_trailing_zero_bits(std::uint32_t h0,
     }
     if (h0 != 0) {
         return 224u + static_cast<std::uint32_t>(__ffs(h0) - 1);
-    }
-    return 256u;
-}
+	    }
+	    return 256u;
+	}
+
+	__device__ __forceinline__ bool rpow2_meets_difficulty_words(std::uint32_t h0,
+	                                                             std::uint32_t h1,
+	                                                             std::uint32_t h2,
+	                                                             std::uint32_t h3,
+	                                                             std::uint32_t h4,
+	                                                             std::uint32_t h5,
+	                                                             std::uint32_t h6,
+	                                                             std::uint32_t h7,
+	                                                             std::uint32_t difficulty_bits) {
+	    if (difficulty_bits == 0u) {
+	        return true;
+	    }
+	    if (difficulty_bits < 32u) {
+	        return (h7 & ((1u << difficulty_bits) - 1u)) == 0u;
+	    }
+	    if (difficulty_bits == 32u) {
+	        return h7 == 0u;
+	    }
+	    return rpow2_trailing_zero_bits(h0, h1, h2, h3, h4, h5, h6, h7) >= difficulty_bits;
+	}
 
 	__device__ __forceinline__ void rpow2_compress_block(std::uint32_t* h0,
 	                                                     std::uint32_t* h1,
@@ -875,7 +896,7 @@ __device__ std::uint32_t rpow2_trailing_zero_bits(std::uint32_t h0,
 	            std::uint32_t h7;
 	            rpow2_hash_nonce(params, nonce, &h0, &h1, &h2, &h3, &h4, &h5, &h6, &h7);
 
-	            if (rpow2_trailing_zero_bits(h0, h1, h2, h3, h4, h5, h6, h7) >= params.difficulty_bits) {
+	            if (rpow2_meets_difficulty_words(h0, h1, h2, h3, h4, h5, h6, h7, params.difficulty_bits)) {
 	                if (atomicCAS(&result->found, 0u, 1u) == 0u) {
 	                    result->nonce = nonce;
 	                    result->digest_words[0] = h0;
@@ -929,7 +950,7 @@ __device__ std::uint32_t rpow2_trailing_zero_bits(std::uint32_t h0,
 		            std::uint32_t h7;
 		            rpow2_hash_nonce_prefix16(params, nonce, &h0, &h1, &h2, &h3, &h4, &h5, &h6, &h7);
 
-		            if (rpow2_trailing_zero_bits(h0, h1, h2, h3, h4, h5, h6, h7) >= params.difficulty_bits) {
+		            if (rpow2_meets_difficulty_words(h0, h1, h2, h3, h4, h5, h6, h7, params.difficulty_bits)) {
 		                if (atomicCAS(&result->found, 0u, 1u) == 0u) {
 		                    result->nonce = nonce;
 		                    result->digest_words[0] = h0;
