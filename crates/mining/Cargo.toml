@@ -9,6 +9,7 @@ mining-cuda-sys = { path = "../mining-cuda-sys" }
 mining-metal-sys = { path = "../mining-metal-sys" }
 mining-opencl-sys = { path = "../mining-opencl-sys" }
 argon2.workspace = true
+rand.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

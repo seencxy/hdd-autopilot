@@ -788,6 +788,7 @@ dependencies = [
  "mining-cuda-sys",
  "mining-metal-sys",
  "mining-opencl-sys",
+ "rand",
  "reqwest",
  "serde",
  "serde_json",

@@ -12,8 +12,8 @@ use hdd_autopilot as _;
 use iana_time_zone as _;
 use mining::MiningError;
 use mining::rpow2::{
-    Rpow2Backend, Rpow2Challenge, Rpow2Client, Rpow2Job, Rpow2MineConfig, mine_rpow2,
-    rpow2_meets_difficulty,
+    Rpow2Backend, Rpow2Challenge, Rpow2Client, Rpow2Job, Rpow2MineConfig, load_rpow2_proxy_file,
+    mine_rpow2, rpow2_meets_difficulty,
 };
 use rand as _;
 use reqwest as _;
@@ -22,6 +22,8 @@ use serde_json::{Value, json};
 use time as _;
 use unicode_width as _;
 use url as _;
+
+const DEFAULT_PROXY_FILE: &str = "rpow2-proxies.txt";
 
 fn main() {
     if let Err(error) = run() {
@@ -56,8 +58,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|| env::var("RPOW2_COOKIE").ok())
         .or_else(|| env::var("RPOW_COOKIE").ok())
         .ok_or("missing RPOW2 cookie; pass --cookie or set RPOW2_COOKIE/RPOW_COOKIE")?;
-    let proxy = args.proxy.clone().or_else(|| env::var("RPOW2_PROXY").ok());
-    let client = Rpow2Client::new_with_proxy(Some(&cookie), proxy.as_deref())?;
+    let (proxy_urls, proxy_file) = load_proxy_pool(&args)?;
+    let client = Rpow2Client::new_with_proxy_pool(Some(&cookie), &proxy_urls)?;
+    if client.proxy_pool_size() > 0 {
+        println!(
+            "proxy_pool={} proxy_file={}",
+            client.proxy_pool_size(),
+            proxy_file
+        );
+    }
     if let Ok(me) = client.me() {
         println!("account: {}", me);
     }
@@ -75,6 +84,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         run_single_round(&client, &args)?;
     }
     Ok(())
+}
+
+fn load_proxy_pool(args: &Args) -> Result<(Vec<String>, String), Box<dyn std::error::Error>> {
+    let proxy_file = args
+        .proxy_file
+        .clone()
+        .or_else(|| env::var("RPOW2_PROXY_FILE").ok())
+        .unwrap_or_else(|| DEFAULT_PROXY_FILE.to_string());
+    let mut proxies = load_rpow2_proxy_file(&proxy_file)?;
+    if let Some(proxy) = args
+        .proxy
+        .clone()
+        .or_else(|| env::var("RPOW2_PROXY").ok())
+        .map(|proxy| proxy.trim().to_string())
+        .filter(|proxy| !proxy.is_empty())
+    {
+        proxies.push(proxy);
+    }
+    Ok((proxies, proxy_file))
 }
 
 fn run_single_round(client: &Rpow2Client, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
@@ -428,6 +456,7 @@ fn error_chain_to_string(error: &(dyn Error + 'static)) -> String {
 struct Args {
     cookie: Option<String>,
     proxy: Option<String>,
+    proxy_file: Option<String>,
     prefix: Option<String>,
     difficulty_bits: Option<u32>,
     cpu_only: bool,
@@ -458,6 +487,10 @@ impl Args {
                 "--proxy" => {
                     index += 1;
                     args.proxy = Some(next_value(&raw, index, "--proxy")?.to_string());
+                }
+                "--proxy-file" => {
+                    index += 1;
+                    args.proxy_file = Some(next_value(&raw, index, "--proxy-file")?.to_string());
                 }
                 "--prefix" => {
                     index += 1;
@@ -538,15 +571,17 @@ fn next_value<'a>(
 fn print_usage() {
     println!(
         "Usage:
-  rpow2mine --cookie '<cookie-header>' [--proxy <url>] [--loop] [--serial-api] [--cpu-only] [--gpu-device <index>] [--gpu-batch-size <hashes>] [--gpu-threads-per-block <n>] [--gpu-nonces-per-thread <n>] [--gpu-max-blocks <n>] [--gpu-no-early-exit] [--challenge-prefetch <n>] [--mint-workers <n>]
+  rpow2mine --cookie '<cookie-header>' [--proxy <url>] [--proxy-file <path>] [--loop] [--serial-api] [--cpu-only] [--gpu-device <index>] [--gpu-batch-size <hashes>] [--gpu-threads-per-block <n>] [--gpu-nonces-per-thread <n>] [--gpu-max-blocks <n>] [--gpu-no-early-exit] [--challenge-prefetch <n>] [--mint-workers <n>]
   rpow2mine --prefix <hex> --difficulty <bits> [--cpu-only] [--gpu-device <index>] [--gpu-batch-size <hashes>]
 
 Environment:
   RPOW2_COOKIE   Cookie header copied from an authenticated rpow2.com browser session
   RPOW_COOKIE    Compatible alias used by other rpow2 GPU miners
   RPOW2_PROXY    HTTP/HTTPS proxy URL for RPOW2 API requests
+  RPOW2_PROXY_FILE  Proxy pool file; defaults to rpow2-proxies.txt
 
 Notes:
+  rpow2-proxies.txt accepts one proxy URL per line; empty lines and # comments are ignored
   Windows GPU mining uses CUDA and defaults to batch 268435456, 512 threads/block, 4 nonces/thread
   --gpu-batch-size 0 enables automatic GPU batch tuning
   --gpu-max-blocks 0 uses an SM-based automatic grid size

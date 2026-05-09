@@ -1,9 +1,13 @@
+use std::fs;
+use std::io;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use rand::Rng as _;
 use reqwest::Proxy;
 use reqwest::Url;
 use reqwest::blocking::Client;
@@ -211,7 +215,8 @@ impl Rpow2Challenge {
 #[derive(Debug, Clone)]
 pub struct Rpow2Client {
     base_url: String,
-    http_client: Client,
+    http_clients: Arc<Vec<Client>>,
+    proxy_pool_size: usize,
 }
 
 impl Rpow2Client {
@@ -223,7 +228,19 @@ impl Rpow2Client {
         cookie_header: Option<&str>,
         proxy_url: Option<&str>,
     ) -> Result<Self, MiningError> {
-        Self::with_base_url_and_proxy("https://api.rpow2.com", cookie_header, proxy_url)
+        let proxy_urls = proxy_url
+            .map(str::trim)
+            .filter(|proxy| !proxy.is_empty())
+            .map(|proxy| vec![proxy.to_string()])
+            .unwrap_or_default();
+        Self::with_base_url_and_proxy_pool("https://api.rpow2.com", cookie_header, &proxy_urls)
+    }
+
+    pub fn new_with_proxy_pool(
+        cookie_header: Option<&str>,
+        proxy_urls: &[String],
+    ) -> Result<Self, MiningError> {
+        Self::with_base_url_and_proxy_pool("https://api.rpow2.com", cookie_header, proxy_urls)
     }
 
     pub fn with_base_url(base_url: &str, cookie_header: Option<&str>) -> Result<Self, MiningError> {
@@ -234,6 +251,19 @@ impl Rpow2Client {
         base_url: &str,
         cookie_header: Option<&str>,
         proxy_url: Option<&str>,
+    ) -> Result<Self, MiningError> {
+        let proxy_urls = proxy_url
+            .map(str::trim)
+            .filter(|proxy| !proxy.is_empty())
+            .map(|proxy| vec![proxy.to_string()])
+            .unwrap_or_default();
+        Self::with_base_url_and_proxy_pool(base_url, cookie_header, &proxy_urls)
+    }
+
+    pub fn with_base_url_and_proxy_pool(
+        base_url: &str,
+        cookie_header: Option<&str>,
+        proxy_urls: &[String],
     ) -> Result<Self, MiningError> {
         let mut headers = HeaderMap::new();
         headers.insert(USER_AGENT, HeaderValue::from_static(DEFAULT_USER_AGENT));
@@ -248,17 +278,29 @@ impl Rpow2Client {
                 );
             }
         }
-        let mut builder = Client::builder()
-            .default_headers(headers)
-            .timeout(RPOW2_HTTP_TIMEOUT)
-            .connect_timeout(RPOW2_HTTP_TIMEOUT);
-        if let Some(proxy_url) = proxy_url.map(str::trim).filter(|proxy| !proxy.is_empty()) {
-            builder = builder.proxy(build_proxy(proxy_url)?);
+        let mut http_clients = Vec::new();
+        let mut proxy_pool_size = 0usize;
+        for proxy_url in proxy_urls
+            .iter()
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|proxy| !proxy.is_empty())
+        {
+            http_clients.push(build_http_client(&headers, Some(proxy_url))?);
+            proxy_pool_size += 1;
+        }
+        if http_clients.is_empty() {
+            http_clients.push(build_http_client(&headers, None)?);
         }
         Ok(Self {
             base_url: base_url.trim().trim_end_matches('/').to_string(),
-            http_client: builder.build()?,
+            http_clients: Arc::new(http_clients),
+            proxy_pool_size,
         })
+    }
+
+    pub fn proxy_pool_size(&self) -> usize {
+        self.proxy_pool_size
     }
 
     pub fn me(&self) -> Result<Value, MiningError> {
@@ -291,7 +333,7 @@ impl Rpow2Client {
 
     fn get_json<T: for<'de> Deserialize<'de>>(&self, path: &str) -> Result<T, MiningError> {
         let response = self
-            .http_client
+            .http_client()
             .get(format!("{}{}", self.base_url, path))
             .send()?;
         decode_response(response)
@@ -302,7 +344,7 @@ impl Rpow2Client {
         path: &str,
     ) -> Result<T, MiningError> {
         let response = self
-            .http_client
+            .http_client()
             .post(format!("{}{}", self.base_url, path))
             .send()?;
         decode_response(response)
@@ -314,12 +356,46 @@ impl Rpow2Client {
         payload: &B,
     ) -> Result<T, MiningError> {
         let response = self
-            .http_client
+            .http_client()
             .post(format!("{}{}", self.base_url, path))
             .json(payload)
             .send()?;
         decode_response(response)
     }
+
+    fn http_client(&self) -> &Client {
+        if self.http_clients.len() == 1 {
+            return &self.http_clients[0];
+        }
+        let index = rand::rng().random_range(0..self.http_clients.len());
+        &self.http_clients[index]
+    }
+}
+
+pub fn load_rpow2_proxy_file(path: impl AsRef<Path>) -> Result<Vec<String>, MiningError> {
+    let path = path.as_ref();
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(MiningError::Io(error)),
+    };
+    Ok(contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_string)
+        .collect())
+}
+
+fn build_http_client(headers: &HeaderMap, proxy_url: Option<&str>) -> Result<Client, MiningError> {
+    let mut builder = Client::builder()
+        .default_headers(headers.clone())
+        .timeout(RPOW2_HTTP_TIMEOUT)
+        .connect_timeout(RPOW2_HTTP_TIMEOUT);
+    if let Some(proxy_url) = proxy_url {
+        builder = builder.proxy(build_proxy(proxy_url)?);
+    }
+    Ok(builder.build()?)
 }
 
 fn build_proxy(proxy_url: &str) -> Result<Proxy, MiningError> {

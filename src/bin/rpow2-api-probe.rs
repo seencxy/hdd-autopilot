@@ -12,7 +12,7 @@ use hdd_autopilot as _;
 #[cfg(not(target_os = "macos"))]
 use iana_time_zone as _;
 use mining::MiningError;
-use mining::rpow2::Rpow2Client;
+use mining::rpow2::{Rpow2Client, load_rpow2_proxy_file};
 use rand as _;
 use reqwest as _;
 use serde as _;
@@ -20,6 +20,8 @@ use serde_json::{Value, json};
 use time as _;
 use unicode_width as _;
 use url as _;
+
+const DEFAULT_PROXY_FILE: &str = "rpow2-proxies.txt";
 
 fn main() {
     if let Err(error) = run() {
@@ -44,12 +46,12 @@ fn run() -> Result<(), Box<dyn Error>> {
     if endpoint.requires_cookie() && cookie.is_none() {
         return Err("missing RPOW2 cookie; pass --cookie or set RPOW2_COOKIE/RPOW_COOKIE".into());
     }
-    let proxy = args.proxy.clone().or_else(|| env::var("RPOW2_PROXY").ok());
+    let (proxy_urls, _) = load_proxy_pool(&args)?;
     let requests = args.requests.unwrap_or(5).max(1);
     let concurrency = args.concurrency.unwrap_or(1).max(1).min(requests);
-    let client = Arc::new(Rpow2Client::new_with_proxy(
+    let client = Arc::new(Rpow2Client::new_with_proxy_pool(
         cookie.as_deref(),
-        proxy.as_deref(),
+        &proxy_urls,
     )?);
 
     println!(
@@ -57,7 +59,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         endpoint.label(),
         requests,
         concurrency,
-        if proxy.is_some() {
+        if client.proxy_pool_size() > 0 {
             "enabled"
         } else {
             "disabled"
@@ -119,6 +121,25 @@ fn run() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn load_proxy_pool(args: &Args) -> Result<(Vec<String>, String), Box<dyn Error>> {
+    let proxy_file = args
+        .proxy_file
+        .clone()
+        .or_else(|| env::var("RPOW2_PROXY_FILE").ok())
+        .unwrap_or_else(|| DEFAULT_PROXY_FILE.to_string());
+    let mut proxies = load_rpow2_proxy_file(&proxy_file)?;
+    if let Some(proxy) = args
+        .proxy
+        .clone()
+        .or_else(|| env::var("RPOW2_PROXY").ok())
+        .map(|proxy| proxy.trim().to_string())
+        .filter(|proxy| !proxy.is_empty())
+    {
+        proxies.push(proxy);
+    }
+    Ok((proxies, proxy_file))
+}
+
 #[derive(Debug)]
 struct ProbeResult {
     request_number: usize,
@@ -177,6 +198,7 @@ impl Endpoint {
 struct Args {
     cookie: Option<String>,
     proxy: Option<String>,
+    proxy_file: Option<String>,
     endpoint: Option<Endpoint>,
     requests: Option<usize>,
     concurrency: Option<usize>,
@@ -196,6 +218,10 @@ impl Args {
                 "--proxy" => {
                     index += 1;
                     args.proxy = Some(next_value(&raw, index, "--proxy")?.to_string());
+                }
+                "--proxy-file" => {
+                    index += 1;
+                    args.proxy_file = Some(next_value(&raw, index, "--proxy-file")?.to_string());
                 }
                 "--endpoint" => {
                     index += 1;
@@ -256,12 +282,13 @@ fn error_chain_to_string(error: &(dyn Error + 'static)) -> String {
 fn print_usage() {
     println!(
         "Usage:
-  rpow2-api-probe [--cookie '<cookie-header>'] [--proxy <url>] [--endpoint me|ledger|challenge] [--requests <n>] [--concurrency <n>]
+  rpow2-api-probe [--cookie '<cookie-header>'] [--proxy <url>] [--proxy-file <path>] [--endpoint me|ledger|challenge] [--requests <n>] [--concurrency <n>]
 
 Environment:
   RPOW2_COOKIE   Cookie header copied from an authenticated rpow2.com browser session
   RPOW_COOKIE    Compatible cookie env alias
   RPOW2_PROXY    HTTP/HTTPS proxy URL for RPOW2 API requests
+  RPOW2_PROXY_FILE  Proxy pool file; defaults to rpow2-proxies.txt
 
 Defaults:
   endpoint       me
