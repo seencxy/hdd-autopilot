@@ -1298,10 +1298,28 @@ Rpow2CudaSession::~Rpow2CudaSession() {
 
 	} // namespace
 
+	namespace {
+
+	std::uint64_t rpow2_session_batch_attempts(std::uint64_t batch_size,
+	                                           std::uint64_t start_nonce,
+	                                           const Rpow2CudaDeviceResult& result) {
+	    if (result.found == 0u || result.nonce < start_nonce) {
+	        return batch_size;
+	    }
+	    const auto found_offset = result.nonce - start_nonce;
+	    if (found_offset >= batch_size) {
+	        return batch_size;
+	    }
+	    return found_offset + 1;
+	}
+
+	} // namespace
+
 	Rpow2CudaProfiledBatchResult Rpow2CudaSession::mine_next_batch_profiled() {
 	    if (std::numeric_limits<std::uint64_t>::max() - next_nonce_ < batch_size_) {
 	        throw std::runtime_error("RPOW2 CUDA nonce range exhausted");
 	    }
+	    const auto start_nonce = next_nonce_;
 	    check_cuda(cudaSetDevice(device_index_), "cudaSetDevice failed");
 	    check_cuda(cudaMemset(device_result_, 0, sizeof(Rpow2CudaDeviceResult)),
 	               "cudaMemset result failed");
@@ -1366,8 +1384,10 @@ Rpow2CudaSession::~Rpow2CudaSession() {
 	    const auto wall_elapsed = std::chrono::duration<double, std::milli>(
 	        std::chrono::steady_clock::now() - wall_started).count();
 
+	    const auto batch_attempts =
+	        rpow2_session_batch_attempts(batch_size_, start_nonce, host_result);
 	    const auto max_attempts = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
-	    attempts_ = attempts_ > max_attempts - batch_size_ ? max_attempts : attempts_ + batch_size_;
+	    attempts_ = attempts_ > max_attempts - batch_attempts ? max_attempts : attempts_ + batch_attempts;
 	    next_nonce_ += batch_size_;
 
 	    Rpow2CudaProfiledBatchResult profiled;
@@ -1386,6 +1406,7 @@ Rpow2CudaSession::~Rpow2CudaSession() {
 	    if (std::numeric_limits<std::uint64_t>::max() - next_nonce_ < batch_size_) {
 	        throw std::runtime_error("RPOW2 CUDA nonce range exhausted");
 	    }
+	    const auto start_nonce = next_nonce_;
 	    check_cuda(cudaSetDevice(device_index_), "cudaSetDevice failed");
 	    check_cuda(cudaMemset(device_result_, 0, sizeof(Rpow2CudaDeviceResult)),
 	               "cudaMemset result failed");
@@ -1430,8 +1451,10 @@ Rpow2CudaSession::~Rpow2CudaSession() {
 	                          cudaMemcpyDeviceToHost),
 	               "cudaMemcpy result failed");
 
+	    const auto batch_attempts =
+	        rpow2_session_batch_attempts(batch_size_, start_nonce, host_result);
 	    const auto max_attempts = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
-	    attempts_ = attempts_ > max_attempts - batch_size_ ? max_attempts : attempts_ + batch_size_;
+	    attempts_ = attempts_ > max_attempts - batch_attempts ? max_attempts : attempts_ + batch_attempts;
 	    next_nonce_ += batch_size_;
 
 	    Rpow2CudaBatchResult result;

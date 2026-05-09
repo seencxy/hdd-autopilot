@@ -295,7 +295,7 @@ fn default_gpu_batch_size() -> u64 {
 fn default_challenge_prefetch() -> usize {
     #[cfg(target_os = "windows")]
     {
-        8
+        2
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -306,7 +306,7 @@ fn default_challenge_prefetch() -> usize {
 fn default_mint_workers() -> usize {
     #[cfg(target_os = "windows")]
     {
-        2
+        1
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -527,7 +527,7 @@ Notes:
   --gpu-batch-size 0 enables automatic GPU batch tuning
   --gpu-max-blocks 0 uses an SM-based automatic grid size
   --gpu-no-early-exit disables cross-thread stop checks inside a CUDA batch
-  --loop defaults to challenge prefetch 8 and mint workers 2 on Windows
+  --loop defaults to challenge prefetch 2 and mint workers 1 on Windows
   macOS GPU mining uses Metal"
     );
 }
