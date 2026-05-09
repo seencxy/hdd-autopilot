@@ -29,6 +29,11 @@ fn main() {
         return;
     }
 
+    if !cmake_is_available() {
+        warn_native_disabled("找不到 cmake 命令；请先安装 CMake，例如运行 brew install cmake。");
+        return;
+    }
+
     let Some(dst) = build_native(cmake_arch) else {
         warn_native_disabled("Metal 原生后端构建失败，已自动降级为不可用后端。");
         return;
@@ -75,6 +80,14 @@ fn warn_native_disabled(reason: &str) {
 fn host_is_macos() -> bool {
     std::env::var("HOST")
         .map(|host| host.contains("apple-darwin"))
+        .unwrap_or(false)
+}
+
+fn cmake_is_available() -> bool {
+    std::process::Command::new("cmake")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
         .unwrap_or(false)
 }
 
