@@ -30,11 +30,17 @@ endif()
 
 add_compile_definitions(HAVE_OPENCL=1 CL_TARGET_OPENCL_VERSION=120)
 
+set(ARGON2_FILL_BLOCK_SOURCE third_party/argon2/src/ref.c)
+if(CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64"
+    OR CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|i[3-6]86)$")
+    set(ARGON2_FILL_BLOCK_SOURCE third_party/argon2/src/opt.c)
+endif()
+
 add_library(argon2_ref STATIC
     third_party/argon2/src/argon2.c
     third_party/argon2/src/core.c
     third_party/argon2/src/encoding.c
-    third_party/argon2/src/opt.c
+    ${ARGON2_FILL_BLOCK_SOURCE}
     third_party/argon2/src/thread.c
     third_party/argon2/src/blake2/blake2b.c
 )

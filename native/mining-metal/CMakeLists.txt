@@ -28,11 +28,17 @@ endforeach()
 find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
 find_library(METAL_FRAMEWORK Metal REQUIRED)
 
+set(ARGON2_FILL_BLOCK_SOURCE ../mining-opencl/third_party/argon2/src/ref.c)
+if(CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64"
+    OR CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|i[3-6]86)$")
+    set(ARGON2_FILL_BLOCK_SOURCE ../mining-opencl/third_party/argon2/src/opt.c)
+endif()
+
 add_library(argon2_ref STATIC
     ../mining-opencl/third_party/argon2/src/argon2.c
     ../mining-opencl/third_party/argon2/src/core.c
     ../mining-opencl/third_party/argon2/src/encoding.c
-    ../mining-opencl/third_party/argon2/src/opt.c
+    ${ARGON2_FILL_BLOCK_SOURCE}
     ../mining-opencl/third_party/argon2/src/thread.c
     ../mining-opencl/third_party/argon2/src/blake2/blake2b.c
 )

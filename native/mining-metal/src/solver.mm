@@ -20,6 +20,9 @@
 #include "argon2-gpu-common/argon2params.h"
 
 #include <argon2.h>
+#ifdef ARGON2_SYNC_POINTS
+#undef ARGON2_SYNC_POINTS
+#endif
 
 namespace app {
 namespace {
