@@ -1,3 +1,4 @@
+use std::collections::{HashSet, VecDeque};
 use std::env;
 use std::error::Error;
 use std::sync::atomic::AtomicBool;
@@ -24,6 +25,7 @@ use unicode_width as _;
 use url as _;
 
 const DEFAULT_PROXY_FILE: &str = "rpow2-proxies.txt";
+const RECENT_CHALLENGE_LIMIT: usize = 4096;
 
 fn main() {
     if let Err(error) = run() {
@@ -228,14 +230,30 @@ fn spawn_challenge_prefetchers(
     prefetch_depth: usize,
 ) -> Receiver<Rpow2Challenge> {
     let (sender, receiver) = sync_channel(prefetch_depth);
+    let recent_challenges = Arc::new(Mutex::new(RecentChallengeIds::new(RECENT_CHALLENGE_LIMIT)));
     for worker_index in 0..prefetch_depth {
         let client = client.clone();
         let sender = sender.clone();
+        let recent_challenges = Arc::clone(&recent_challenges);
         thread::spawn(move || {
             let label = format!("challenge-prefetch-{worker_index}");
             loop {
                 match retry_online(&label, || client.challenge()) {
                     Ok(challenge) => {
+                        let is_new_challenge = {
+                            let mut recent_challenges = recent_challenges
+                                .lock()
+                                .expect("recent challenge lock poisoned");
+                            recent_challenges.insert(challenge.challenge_id.clone())
+                        };
+                        if !is_new_challenge {
+                            eprintln!(
+                                "{} skipped duplicate challenge={}",
+                                label, challenge.challenge_id
+                            );
+                            thread::sleep(Duration::from_secs(1));
+                            continue;
+                        }
                         if sender.send(challenge).is_err() {
                             break;
                         }
@@ -254,6 +272,37 @@ fn spawn_challenge_prefetchers(
     }
     drop(sender);
     receiver
+}
+
+#[derive(Debug)]
+struct RecentChallengeIds {
+    limit: usize,
+    order: VecDeque<String>,
+    ids: HashSet<String>,
+}
+
+impl RecentChallengeIds {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit: limit.max(1),
+            order: VecDeque::new(),
+            ids: HashSet::new(),
+        }
+    }
+
+    fn insert(&mut self, challenge_id: String) -> bool {
+        if self.ids.contains(&challenge_id) {
+            return false;
+        }
+        self.ids.insert(challenge_id.clone());
+        self.order.push_back(challenge_id);
+        while self.order.len() > self.limit {
+            if let Some(expired) = self.order.pop_front() {
+                self.ids.remove(&expired);
+            }
+        }
+        true
+    }
 }
 
 fn spawn_mint_workers(client: Rpow2Client, worker_count: usize) -> SyncSender<MintJob> {
