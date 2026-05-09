@@ -215,8 +215,9 @@ impl Rpow2Challenge {
 #[derive(Debug, Clone)]
 pub struct Rpow2Client {
     base_url: String,
-    http_clients: Arc<Vec<Client>>,
-    proxy_pool_size: usize,
+    headers: HeaderMap,
+    direct_client: Client,
+    proxy_urls: Arc<Vec<String>>,
 }
 
 impl Rpow2Client {
@@ -304,29 +305,24 @@ impl Rpow2Client {
                 );
             }
         }
-        let mut http_clients = Vec::new();
-        let mut proxy_pool_size = 0usize;
-        for proxy_url in proxy_urls
+        let proxy_urls = proxy_urls
             .iter()
             .map(String::as_str)
             .map(str::trim)
             .filter(|proxy| !proxy.is_empty())
-        {
-            http_clients.push(build_http_client(&headers, Some(proxy_url))?);
-            proxy_pool_size += 1;
-        }
-        if http_clients.is_empty() {
-            http_clients.push(build_http_client(&headers, None)?);
-        }
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let direct_client = build_http_client(&headers, None)?;
         Ok(Self {
             base_url: base_url.trim().trim_end_matches('/').to_string(),
-            http_clients: Arc::new(http_clients),
-            proxy_pool_size,
+            headers,
+            direct_client,
+            proxy_urls: Arc::new(proxy_urls),
         })
     }
 
     pub fn proxy_pool_size(&self) -> usize {
-        self.proxy_pool_size
+        self.proxy_urls.len()
     }
 
     pub fn me(&self) -> Result<Value, MiningError> {
@@ -358,8 +354,9 @@ impl Rpow2Client {
     }
 
     fn get_json<T: for<'de> Deserialize<'de>>(&self, path: &str) -> Result<T, MiningError> {
+        let client = self.request_client()?;
         let response = self
-            .http_client()
+            .client_ref(&client)
             .get(format!("{}{}", self.base_url, path))
             .send()?;
         decode_response(response)
@@ -369,8 +366,9 @@ impl Rpow2Client {
         &self,
         path: &str,
     ) -> Result<T, MiningError> {
+        let client = self.request_client()?;
         let response = self
-            .http_client()
+            .client_ref(&client)
             .post(format!("{}{}", self.base_url, path))
             .send()?;
         decode_response(response)
@@ -381,20 +379,28 @@ impl Rpow2Client {
         path: &str,
         payload: &B,
     ) -> Result<T, MiningError> {
+        let client = self.request_client()?;
         let response = self
-            .http_client()
+            .client_ref(&client)
             .post(format!("{}{}", self.base_url, path))
             .json(payload)
             .send()?;
         decode_response(response)
     }
 
-    fn http_client(&self) -> &Client {
-        if self.http_clients.len() == 1 {
-            return &self.http_clients[0];
+    fn request_client(&self) -> Result<Option<Client>, MiningError> {
+        if self.proxy_urls.is_empty() {
+            return Ok(None);
         }
-        let index = rand::rng().random_range(0..self.http_clients.len());
-        &self.http_clients[index]
+        let index = rand::rng().random_range(0..self.proxy_urls.len());
+        Ok(Some(build_http_client(
+            &self.headers,
+            Some(self.proxy_urls[index].as_str()),
+        )?))
+    }
+
+    fn client_ref<'a>(&'a self, request_client: &'a Option<Client>) -> &'a Client {
+        request_client.as_ref().unwrap_or(&self.direct_client)
     }
 }
 
