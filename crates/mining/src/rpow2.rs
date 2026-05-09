@@ -11,7 +11,7 @@ use rand::Rng as _;
 use reqwest::Proxy;
 use reqwest::Url;
 use reqwest::blocking::Client;
-use reqwest::header::{COOKIE, HeaderMap, HeaderValue, USER_AGENT};
+use reqwest::header::{COOKIE, HeaderMap, HeaderValue, ORIGIN, REFERER, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -265,8 +265,34 @@ impl Rpow2Client {
         cookie_header: Option<&str>,
         proxy_urls: &[String],
     ) -> Result<Self, MiningError> {
+        Self::with_base_url_origin_and_proxy_pool(base_url, cookie_header, None, None, proxy_urls)
+    }
+
+    pub fn with_base_url_origin_and_proxy_pool(
+        base_url: &str,
+        cookie_header: Option<&str>,
+        origin: Option<&str>,
+        referer: Option<&str>,
+        proxy_urls: &[String],
+    ) -> Result<Self, MiningError> {
         let mut headers = HeaderMap::new();
         headers.insert(USER_AGENT, HeaderValue::from_static(DEFAULT_USER_AGENT));
+        if let Some(origin) = origin.map(str::trim).filter(|origin| !origin.is_empty()) {
+            headers.insert(
+                ORIGIN,
+                HeaderValue::from_str(origin).map_err(|error| {
+                    MiningError::Message(format!("RPOW origin header 格式无效：{}", error))
+                })?,
+            );
+        }
+        if let Some(referer) = referer.map(str::trim).filter(|referer| !referer.is_empty()) {
+            headers.insert(
+                REFERER,
+                HeaderValue::from_str(referer).map_err(|error| {
+                    MiningError::Message(format!("RPOW referer header 格式无效：{}", error))
+                })?,
+            );
+        }
         if let Some(cookie_header) = cookie_header {
             let cookie_header = cookie_header.trim();
             if !cookie_header.is_empty() {

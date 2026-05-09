@@ -22,7 +22,7 @@ use serde as _;
 use serde_json::{Value, json};
 use time as _;
 use unicode_width as _;
-use url as _;
+use url::Url;
 
 const DEFAULT_PROXY_FILE: &str = "rpow2-proxies.txt";
 const RECENT_CHALLENGE_LIMIT: usize = 4096;
@@ -54,14 +54,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let cookie = args
-        .cookie
-        .clone()
-        .or_else(|| env::var("RPOW2_COOKIE").ok())
-        .or_else(|| env::var("RPOW_COOKIE").ok())
-        .ok_or("missing RPOW2 cookie; pass --cookie or set RPOW2_COOKIE/RPOW_COOKIE")?;
-    let (proxy_urls, proxy_file) = load_proxy_pool(&args)?;
-    let client = Rpow2Client::new_with_proxy_pool(Some(&cookie), &proxy_urls)?;
+    let target = ApiTarget::from_args(&args)?;
+    let cookie = load_cookie(&args, target.network)?;
+    let (proxy_urls, proxy_file) = load_proxy_pool(&args, target.network)?;
+    let client = Rpow2Client::with_base_url_origin_and_proxy_pool(
+        &target.api_base,
+        Some(&cookie),
+        target.origin.as_deref(),
+        target.referer.as_deref(),
+        &proxy_urls,
+    )?;
+    println!(
+        "network={} api_base={}",
+        target.network.label(),
+        target.api_base
+    );
     if client.proxy_pool_size() > 0 {
         println!(
             "proxy_pool={} proxy_file={}",
@@ -88,23 +95,171 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn load_proxy_pool(args: &Args) -> Result<(Vec<String>, String), Box<dyn std::error::Error>> {
+fn load_cookie(args: &Args, network: RpowNetwork) -> Result<String, Box<dyn std::error::Error>> {
+    args.cookie
+        .clone()
+        .or_else(|| env::var(network.cookie_env()).ok())
+        .or_else(|| env::var("RPOW_COOKIE").ok())
+        .ok_or_else(|| {
+            format!(
+                "missing RPOW cookie; pass --cookie or set {}/RPOW_COOKIE",
+                network.cookie_env()
+            )
+            .into()
+        })
+}
+
+fn load_proxy_pool(
+    args: &Args,
+    network: RpowNetwork,
+) -> Result<(Vec<String>, String), Box<dyn std::error::Error>> {
     let proxy_file = args
         .proxy_file
         .clone()
-        .or_else(|| env::var("RPOW2_PROXY_FILE").ok())
-        .unwrap_or_else(|| DEFAULT_PROXY_FILE.to_string());
+        .or_else(|| env::var(network.proxy_file_env()).ok())
+        .or_else(|| env::var("RPOW_PROXY_FILE").ok())
+        .unwrap_or_else(|| network.default_proxy_file().to_string());
     let mut proxies = load_rpow2_proxy_file(&proxy_file)?;
     if let Some(proxy) = args
         .proxy
         .clone()
-        .or_else(|| env::var("RPOW2_PROXY").ok())
+        .or_else(|| env::var(network.proxy_env()).ok())
+        .or_else(|| env::var("RPOW_PROXY").ok())
         .map(|proxy| proxy.trim().to_string())
         .filter(|proxy| !proxy.is_empty())
     {
         proxies.push(proxy);
     }
     Ok((proxies, proxy_file))
+}
+
+#[derive(Debug, Clone)]
+struct ApiTarget {
+    network: RpowNetwork,
+    api_base: String,
+    origin: Option<String>,
+    referer: Option<String>,
+}
+
+impl ApiTarget {
+    fn from_args(args: &Args) -> Result<Self, Box<dyn std::error::Error>> {
+        let network = args.network.unwrap_or(RpowNetwork::Rpow2);
+        let api_base = args
+            .api_base
+            .clone()
+            .or_else(|| env::var(network.api_base_env()).ok())
+            .or_else(|| env::var("RPOW_API_BASE").ok())
+            .unwrap_or_else(|| network.default_api_base().to_string());
+        Url::parse(&api_base).map_err(|error| format!("invalid API base URL: {error}"))?;
+        let origin = args
+            .origin
+            .clone()
+            .or_else(|| env::var(network.origin_env()).ok())
+            .or_else(|| env::var("RPOW_ORIGIN").ok())
+            .or_else(|| Some(network.default_origin().to_string()));
+        let referer = args
+            .referer
+            .clone()
+            .or_else(|| env::var(network.referer_env()).ok())
+            .or_else(|| env::var("RPOW_REFERER").ok())
+            .or_else(|| {
+                origin
+                    .as_ref()
+                    .map(|origin| format!("{}/", origin.trim_end_matches('/')))
+            });
+        Ok(Self {
+            network,
+            api_base,
+            origin,
+            referer,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RpowNetwork {
+    Rpow2,
+    Rpow3,
+}
+
+impl RpowNetwork {
+    fn parse(value: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        match value {
+            "rpow2" | "2" => Ok(Self::Rpow2),
+            "rpow3" | "3" => Ok(Self::Rpow3),
+            _ => Err(format!("unknown network: {value}; expected rpow2 or rpow3").into()),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Rpow2 => "rpow2",
+            Self::Rpow3 => "rpow3",
+        }
+    }
+
+    fn default_api_base(self) -> &'static str {
+        match self {
+            Self::Rpow2 => "https://api.rpow2.com",
+            Self::Rpow3 => "https://api.rpow3.com",
+        }
+    }
+
+    fn default_origin(self) -> &'static str {
+        match self {
+            Self::Rpow2 => "https://rpow2.com",
+            Self::Rpow3 => "https://rpow3.com",
+        }
+    }
+
+    fn default_proxy_file(self) -> &'static str {
+        match self {
+            Self::Rpow2 => DEFAULT_PROXY_FILE,
+            Self::Rpow3 => "rpow3-proxies.txt",
+        }
+    }
+
+    fn cookie_env(self) -> &'static str {
+        match self {
+            Self::Rpow2 => "RPOW2_COOKIE",
+            Self::Rpow3 => "RPOW3_COOKIE",
+        }
+    }
+
+    fn api_base_env(self) -> &'static str {
+        match self {
+            Self::Rpow2 => "RPOW2_API_BASE",
+            Self::Rpow3 => "RPOW3_API_BASE",
+        }
+    }
+
+    fn origin_env(self) -> &'static str {
+        match self {
+            Self::Rpow2 => "RPOW2_ORIGIN",
+            Self::Rpow3 => "RPOW3_ORIGIN",
+        }
+    }
+
+    fn referer_env(self) -> &'static str {
+        match self {
+            Self::Rpow2 => "RPOW2_REFERER",
+            Self::Rpow3 => "RPOW3_REFERER",
+        }
+    }
+
+    fn proxy_env(self) -> &'static str {
+        match self {
+            Self::Rpow2 => "RPOW2_PROXY",
+            Self::Rpow3 => "RPOW3_PROXY",
+        }
+    }
+
+    fn proxy_file_env(self) -> &'static str {
+        match self {
+            Self::Rpow2 => "RPOW2_PROXY_FILE",
+            Self::Rpow3 => "RPOW3_PROXY_FILE",
+        }
+    }
 }
 
 fn run_single_round(client: &Rpow2Client, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
@@ -504,6 +659,10 @@ fn error_chain_to_string(error: &(dyn Error + 'static)) -> String {
 #[derive(Debug, Default)]
 struct Args {
     cookie: Option<String>,
+    network: Option<RpowNetwork>,
+    api_base: Option<String>,
+    origin: Option<String>,
+    referer: Option<String>,
     proxy: Option<String>,
     proxy_file: Option<String>,
     prefix: Option<String>,
@@ -532,6 +691,24 @@ impl Args {
                 "--cookie" => {
                     index += 1;
                     args.cookie = Some(next_value(&raw, index, "--cookie")?.to_string());
+                }
+                "--network" => {
+                    index += 1;
+                    args.network = Some(RpowNetwork::parse(next_value(&raw, index, "--network")?)?);
+                }
+                "--rpow2" => args.network = Some(RpowNetwork::Rpow2),
+                "--rpow3" => args.network = Some(RpowNetwork::Rpow3),
+                "--api-base" => {
+                    index += 1;
+                    args.api_base = Some(next_value(&raw, index, "--api-base")?.to_string());
+                }
+                "--origin" => {
+                    index += 1;
+                    args.origin = Some(next_value(&raw, index, "--origin")?.to_string());
+                }
+                "--referer" => {
+                    index += 1;
+                    args.referer = Some(next_value(&raw, index, "--referer")?.to_string());
                 }
                 "--proxy" => {
                     index += 1;
@@ -620,17 +797,20 @@ fn next_value<'a>(
 fn print_usage() {
     println!(
         "Usage:
-  rpow2mine --cookie '<cookie-header>' [--proxy <url>] [--proxy-file <path>] [--loop] [--serial-api] [--cpu-only] [--gpu-device <index>] [--gpu-batch-size <hashes>] [--gpu-threads-per-block <n>] [--gpu-nonces-per-thread <n>] [--gpu-max-blocks <n>] [--gpu-no-early-exit] [--challenge-prefetch <n>] [--mint-workers <n>]
+  rpow2mine --cookie '<cookie-header>' [--network rpow2|rpow3] [--api-base <url>] [--proxy <url>] [--proxy-file <path>] [--loop] [--serial-api] [--cpu-only] [--gpu-device <index>] [--gpu-batch-size <hashes>] [--gpu-threads-per-block <n>] [--gpu-nonces-per-thread <n>] [--gpu-max-blocks <n>] [--gpu-no-early-exit] [--challenge-prefetch <n>] [--mint-workers <n>]
   rpow2mine --prefix <hex> --difficulty <bits> [--cpu-only] [--gpu-device <index>] [--gpu-batch-size <hashes>]
 
 Environment:
   RPOW2_COOKIE   Cookie header copied from an authenticated rpow2.com browser session
-  RPOW_COOKIE    Compatible alias used by other rpow2 GPU miners
-  RPOW2_PROXY    HTTP/HTTPS proxy URL for RPOW2 API requests
-  RPOW2_PROXY_FILE  Proxy pool file; defaults to rpow2-proxies.txt
+  RPOW3_COOKIE   Cookie header copied from an authenticated rpow3.com browser session
+  RPOW_COOKIE    Compatible cookie alias
+  RPOW2_API_BASE/RPOW3_API_BASE/RPOW_API_BASE override API base URL
+  RPOW2_PROXY/RPOW3_PROXY/RPOW_PROXY HTTP/HTTPS proxy URL for API requests
+  RPOW2_PROXY_FILE/RPOW3_PROXY_FILE/RPOW_PROXY_FILE proxy pool file
 
 Notes:
-  rpow2-proxies.txt accepts one proxy URL per line; empty lines and # comments are ignored
+  --network rpow3 defaults to https://api.rpow3.com with Origin/Referer https://rpow3.com
+  proxy files accept one proxy URL per line; empty lines and # comments are ignored
   Windows GPU mining uses CUDA and defaults to batch 268435456, 512 threads/block, 4 nonces/thread
   --gpu-batch-size 0 enables automatic GPU batch tuning
   --gpu-max-blocks 0 uses an SM-based automatic grid size
