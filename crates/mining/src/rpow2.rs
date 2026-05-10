@@ -2,20 +2,25 @@ use std::fs;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use rand::Rng as _;
+use bip39::{Language, Mnemonic};
+use ed25519_dalek::{Signer, SigningKey};
+use hmac::{Hmac, Mac};
 use reqwest::Proxy;
 use reqwest::Url;
 use reqwest::blocking::Client;
-use reqwest::header::{COOKIE, HeaderMap, HeaderValue, ORIGIN, REFERER, USER_AGENT};
+use reqwest::header::{
+    ACCEPT, ACCEPT_LANGUAGE, COOKIE, HeaderMap, HeaderValue, ORIGIN, REFERER, USER_AGENT,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::Sha512;
 
-use crate::{DEFAULT_USER_AGENT, MiningError};
+use crate::MiningError;
 
 const CPU_ATTEMPT_FLUSH_INTERVAL: i64 = 4096;
 const AUTO_GPU_BATCH_SIZE: u64 = 0;
@@ -32,6 +37,9 @@ const CUDA_AUTO_TUNE_BATCH_SIZES: [u64; 4] = [1 << 24, 1 << 26, DEFAULT_CUDA_BAT
 #[cfg(target_os = "macos")]
 const METAL_AUTO_TUNE_BATCH_SIZES: [u64; 4] = [1 << 18, 1 << 20, 1 << 22, 1 << 24];
 const RPOW2_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+const RPOW4_DERIVATION_PATH: [u32; 4] = [44, 501, 0, 0];
+
+type HmacSha512 = Hmac<Sha512>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rpow2Job {
@@ -204,6 +212,12 @@ pub struct Rpow2Challenge {
     pub challenge_id: String,
     pub nonce_prefix: String,
     pub difficulty_bits: u32,
+    #[serde(default)]
+    pub issued_at: Option<Value>,
+    #[serde(default)]
+    pub expires_at: Option<Value>,
+    #[serde(default)]
+    pub challenge_mac: Option<String>,
 }
 
 impl Rpow2Challenge {
@@ -212,12 +226,181 @@ impl Rpow2Challenge {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Rpow2RequestRoute {
+    Direct,
+    Proxy(String),
+}
+
+impl Rpow2RequestRoute {
+    pub fn proxy_url(&self) -> Option<&str> {
+        match self {
+            Self::Direct => None,
+            Self::Proxy(proxy_url) => Some(proxy_url),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Rpow2RoutedChallenge {
+    challenge: Rpow2Challenge,
+    route: Rpow2RequestRoute,
+}
+
+impl Rpow2RoutedChallenge {
+    pub fn challenge(&self) -> &Rpow2Challenge {
+        &self.challenge
+    }
+
+    pub fn route(&self) -> &Rpow2RequestRoute {
+        &self.route
+    }
+
+    pub fn proxy_url(&self) -> Option<&str> {
+        self.route.proxy_url()
+    }
+
+    pub fn into_challenge(self) -> Rpow2Challenge {
+        self.challenge
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Rpow4Signer {
+    seed: [u8; 32],
+    public_key_base58: String,
+}
+
+impl Rpow4Signer {
+    pub fn from_private_key(value: &str) -> Result<Self, MiningError> {
+        let decoded = decode_rpow4_secret(value)?;
+        let seed = match decoded.len() {
+            32 => bytes32(&decoded),
+            64 => bytes32(&decoded[..32]),
+            len => {
+                return Err(MiningError::Message(format!(
+                    "RPOW4 private key must decode to 32-byte seed or 64-byte secret key; got {len} bytes"
+                )));
+            }
+        };
+        Ok(Self::from_seed(seed))
+    }
+
+    pub fn from_mnemonic(value: &str) -> Result<Self, MiningError> {
+        let phrase = value
+            .trim()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mnemonic = Mnemonic::parse_in_normalized(Language::English, &phrase)
+            .map_err(|error| MiningError::Message(format!("invalid RPOW4 mnemonic: {error}")))?;
+        let seed = mnemonic.to_seed("");
+        Ok(Self::from_seed(derive_rpow4_seed(&seed)))
+    }
+
+    pub fn public_key_base58(&self) -> &str {
+        &self.public_key_base58
+    }
+
+    pub fn sign_mint(
+        &self,
+        challenge_id: &str,
+        solution_nonce: u64,
+    ) -> Result<String, MiningError> {
+        let solution_nonce = solution_nonce.to_string();
+        let message = rpow4_signing_message("mint", challenge_id, &solution_nonce)?;
+        let signing_key = SigningKey::from_bytes(&self.seed);
+        let signature = signing_key.sign(message.as_bytes());
+        Ok(bs58::encode(signature.to_bytes()).into_string())
+    }
+
+    fn from_seed(seed: [u8; 32]) -> Self {
+        let signing_key = SigningKey::from_bytes(&seed);
+        let public_key_base58 = bs58::encode(signing_key.verifying_key().to_bytes()).into_string();
+        Self {
+            seed,
+            public_key_base58,
+        }
+    }
+}
+
+fn decode_rpow4_secret(value: &str) -> Result<Vec<u8>, MiningError> {
+    let trimmed = value.trim();
+    if matches!(trimmed.len(), 64 | 128) && trimmed.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return decode_hex_bytes(trimmed);
+    }
+    bs58::decode(trimmed)
+        .into_vec()
+        .map_err(|error| MiningError::Message(format!("invalid RPOW4 base58 private key: {error}")))
+}
+
+fn decode_hex_bytes(value: &str) -> Result<Vec<u8>, MiningError> {
+    let mut output = Vec::with_capacity(value.len() / 2);
+    for index in (0..value.len()).step_by(2) {
+        let byte = u8::from_str_radix(&value[index..index + 2], 16).map_err(|_| {
+            MiningError::Message(format!(
+                "invalid RPOW4 hex byte: {}",
+                &value[index..index + 2]
+            ))
+        })?;
+        output.push(byte);
+    }
+    Ok(output)
+}
+
+fn derive_rpow4_seed(seed: &[u8; 64]) -> [u8; 32] {
+    let mut key = hmac_sha512(b"ed25519 seed", seed);
+    for index in RPOW4_DERIVATION_PATH {
+        let hardened = index | 0x8000_0000;
+        let mut data = Vec::with_capacity(37);
+        data.push(0);
+        data.extend_from_slice(&key[..32]);
+        data.extend_from_slice(&hardened.to_be_bytes());
+        key = hmac_sha512(&key[32..], &data);
+    }
+    bytes32(&key[..32])
+}
+
+fn hmac_sha512(key: &[u8], data: &[u8]) -> [u8; 64] {
+    let mut mac = HmacSha512::new_from_slice(key).expect("HMAC accepts keys of any size");
+    mac.update(data);
+    let output = mac.finalize().into_bytes();
+    let mut bytes = [0u8; 64];
+    bytes.copy_from_slice(&output);
+    bytes
+}
+
+fn bytes32(bytes: &[u8]) -> [u8; 32] {
+    let mut output = [0u8; 32];
+    output.copy_from_slice(bytes);
+    output
+}
+
+fn rpow4_signing_message(
+    action: &str,
+    challenge_id: &str,
+    solution_nonce: &str,
+) -> Result<String, MiningError> {
+    let challenge_id = serde_json::to_string(challenge_id)?;
+    let solution_nonce = serde_json::to_string(solution_nonce)?;
+    Ok(format!(
+        "rpow4.{action}.v1\n{{\"challenge_id\":{challenge_id},\"solution_nonce\":{solution_nonce}}}"
+    ))
+}
+
 #[derive(Debug, Clone)]
 pub struct Rpow2Client {
     base_url: String,
     headers: HeaderMap,
     direct_client: Client,
-    proxy_urls: Arc<Vec<String>>,
+    proxy_clients: Arc<Vec<ProxyClient>>,
+    next_proxy_index: Arc<AtomicUsize>,
+}
+
+#[derive(Debug, Clone)]
+struct ProxyClient {
+    url: String,
+    client: Client,
 }
 
 impl Rpow2Client {
@@ -277,7 +460,25 @@ impl Rpow2Client {
         proxy_urls: &[String],
     ) -> Result<Self, MiningError> {
         let mut headers = HeaderMap::new();
-        headers.insert(USER_AGENT, HeaderValue::from_static(DEFAULT_USER_AGENT));
+        headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
+        headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("zh-CN,zh;q=0.9"));
+        headers.insert(USER_AGENT, HeaderValue::from_static(rpow_user_agent()));
+        headers.insert("sec-fetch-dest", HeaderValue::from_static("empty"));
+        headers.insert("sec-fetch-mode", HeaderValue::from_static("cors"));
+        headers.insert(
+            "sec-fetch-site",
+            HeaderValue::from_static(default_sec_fetch_site(base_url, origin)),
+        );
+        headers.insert("priority", HeaderValue::from_static("u=1, i"));
+        headers.insert("sec-ch-ua-mobile", HeaderValue::from_static("?0"));
+        headers.insert(
+            "sec-ch-ua-platform",
+            HeaderValue::from_static(rpow_sec_ch_ua_platform()),
+        );
+        headers.insert(
+            "sec-ch-ua",
+            HeaderValue::from_static("\"Not/A)Brand\";v=\"99\", \"Chromium\";v=\"148\""),
+        );
         if let Some(origin) = origin.map(str::trim).filter(|origin| !origin.is_empty()) {
             headers.insert(
                 ORIGIN,
@@ -313,16 +514,26 @@ impl Rpow2Client {
             .map(str::to_string)
             .collect::<Vec<_>>();
         let direct_client = build_http_client(&headers, None)?;
+        let proxy_clients = proxy_urls
+            .into_iter()
+            .map(|url| {
+                Ok(ProxyClient {
+                    client: build_http_client(&headers, Some(url.as_str()))?,
+                    url,
+                })
+            })
+            .collect::<Result<Vec<_>, MiningError>>()?;
         Ok(Self {
             base_url: base_url.trim().trim_end_matches('/').to_string(),
             headers,
             direct_client,
-            proxy_urls: Arc::new(proxy_urls),
+            proxy_clients: Arc::new(proxy_clients),
+            next_proxy_index: Arc::new(AtomicUsize::new(0)),
         })
     }
 
     pub fn proxy_pool_size(&self) -> usize {
-        self.proxy_urls.len()
+        self.proxy_clients.len()
     }
 
     pub fn me(&self) -> Result<Value, MiningError> {
@@ -334,42 +545,131 @@ impl Rpow2Client {
     }
 
     pub fn challenge(&self) -> Result<Rpow2Challenge, MiningError> {
-        self.post_json_without_body("/challenge")
+        self.challenge_with_route()
+            .map(Rpow2RoutedChallenge::into_challenge)
+    }
+
+    pub fn challenge_with_route(&self) -> Result<Rpow2RoutedChallenge, MiningError> {
+        let request = self.request_client()?;
+        let response = request
+            .client
+            .post(format!("{}{}", self.base_url, "/challenge"))
+            .send()?;
+        Ok(Rpow2RoutedChallenge {
+            challenge: decode_response(response)?,
+            route: request.route,
+        })
     }
 
     pub fn mint(&self, challenge_id: &str, solution_nonce: u64) -> Result<Value, MiningError> {
+        self.mint_inner(challenge_id, solution_nonce, None)
+    }
+
+    pub fn mint_via_route(
+        &self,
+        challenge_id: &str,
+        solution_nonce: u64,
+        route: &Rpow2RequestRoute,
+    ) -> Result<Value, MiningError> {
+        self.mint_inner(challenge_id, solution_nonce, Some(route))
+    }
+
+    fn mint_inner(
+        &self,
+        challenge_id: &str,
+        solution_nonce: u64,
+        route: Option<&Rpow2RequestRoute>,
+    ) -> Result<Value, MiningError> {
         #[derive(Serialize)]
         struct MintRequest<'a> {
             challenge_id: &'a str,
             solution_nonce: String,
         }
 
-        self.post_json(
-            "/mint",
-            &MintRequest {
-                challenge_id,
-                solution_nonce: solution_nonce.to_string(),
-            },
+        let payload = MintRequest {
+            challenge_id,
+            solution_nonce: solution_nonce.to_string(),
+        };
+        match route {
+            Some(route) => self.post_json_via_route("/mint", &payload, route),
+            None => self.post_json("/mint", &payload),
+        }
+    }
+
+    pub fn mint_rpow4(
+        &self,
+        challenge: &Rpow2Challenge,
+        solution_nonce: u64,
+        client_signature_base58: &str,
+    ) -> Result<Value, MiningError> {
+        self.mint_rpow4_inner(challenge, solution_nonce, client_signature_base58, None)
+    }
+
+    pub fn mint_rpow4_via_route(
+        &self,
+        challenge: &Rpow2Challenge,
+        solution_nonce: u64,
+        client_signature_base58: &str,
+        route: &Rpow2RequestRoute,
+    ) -> Result<Value, MiningError> {
+        self.mint_rpow4_inner(
+            challenge,
+            solution_nonce,
+            client_signature_base58,
+            Some(route),
         )
     }
 
-    fn get_json<T: for<'de> Deserialize<'de>>(&self, path: &str) -> Result<T, MiningError> {
-        let client = self.request_client()?;
-        let response = self
-            .client_ref(&client)
-            .get(format!("{}{}", self.base_url, path))
-            .send()?;
-        decode_response(response)
+    fn mint_rpow4_inner(
+        &self,
+        challenge: &Rpow2Challenge,
+        solution_nonce: u64,
+        client_signature_base58: &str,
+        route: Option<&Rpow2RequestRoute>,
+    ) -> Result<Value, MiningError> {
+        #[derive(Serialize)]
+        struct MintRequest<'a> {
+            challenge_id: &'a str,
+            nonce_prefix: &'a str,
+            difficulty_bits: u32,
+            issued_at: &'a Value,
+            expires_at: &'a Value,
+            challenge_mac: &'a str,
+            solution_nonce: String,
+            client_signature_base58: &'a str,
+        }
+
+        let issued_at = challenge.issued_at.as_ref().ok_or_else(|| {
+            MiningError::Message("RPOW4 challenge 缺少 issued_at 字段。".to_string())
+        })?;
+        let expires_at = challenge.expires_at.as_ref().ok_or_else(|| {
+            MiningError::Message("RPOW4 challenge 缺少 expires_at 字段。".to_string())
+        })?;
+        let challenge_mac = challenge.challenge_mac.as_deref().ok_or_else(|| {
+            MiningError::Message("RPOW4 challenge 缺少 challenge_mac 字段。".to_string())
+        })?;
+
+        let payload = MintRequest {
+            challenge_id: &challenge.challenge_id,
+            nonce_prefix: &challenge.nonce_prefix,
+            difficulty_bits: challenge.difficulty_bits,
+            issued_at,
+            expires_at,
+            challenge_mac,
+            solution_nonce: solution_nonce.to_string(),
+            client_signature_base58,
+        };
+        match route {
+            Some(route) => self.post_json_via_route("/mint", &payload, route),
+            None => self.post_json("/mint", &payload),
+        }
     }
 
-    fn post_json_without_body<T: for<'de> Deserialize<'de>>(
-        &self,
-        path: &str,
-    ) -> Result<T, MiningError> {
-        let client = self.request_client()?;
+    fn get_json<T: for<'de> Deserialize<'de>>(&self, path: &str) -> Result<T, MiningError> {
+        let request = self.request_client()?;
         let response = self
-            .client_ref(&client)
-            .post(format!("{}{}", self.base_url, path))
+            .client_ref(&request)
+            .get(format!("{}{}", self.base_url, path))
             .send()?;
         decode_response(response)
     }
@@ -379,28 +679,130 @@ impl Rpow2Client {
         path: &str,
         payload: &B,
     ) -> Result<T, MiningError> {
-        let client = self.request_client()?;
+        let request = self.request_client()?;
         let response = self
-            .client_ref(&client)
+            .client_ref(&request)
             .post(format!("{}{}", self.base_url, path))
             .json(payload)
             .send()?;
         decode_response(response)
     }
 
-    fn request_client(&self) -> Result<Option<Client>, MiningError> {
-        if self.proxy_urls.is_empty() {
-            return Ok(None);
-        }
-        let index = rand::rng().random_range(0..self.proxy_urls.len());
-        Ok(Some(build_http_client(
-            &self.headers,
-            Some(self.proxy_urls[index].as_str()),
-        )?))
+    fn post_json_via_route<T: for<'de> Deserialize<'de>, B: Serialize>(
+        &self,
+        path: &str,
+        payload: &B,
+        route: &Rpow2RequestRoute,
+    ) -> Result<T, MiningError> {
+        let request = self.request_client_for_route(route)?;
+        let response = self
+            .client_ref(&request)
+            .post(format!("{}{}", self.base_url, path))
+            .json(payload)
+            .send()?;
+        decode_response(response)
     }
 
-    fn client_ref<'a>(&'a self, request_client: &'a Option<Client>) -> &'a Client {
-        request_client.as_ref().unwrap_or(&self.direct_client)
+    fn request_client(&self) -> Result<RoutedHttpClient, MiningError> {
+        if self.proxy_clients.is_empty() {
+            return Ok(RoutedHttpClient {
+                client: self.direct_client.clone(),
+                route: Rpow2RequestRoute::Direct,
+            });
+        }
+        let index =
+            self.next_proxy_index.fetch_add(1, Ordering::Relaxed) % self.proxy_clients.len();
+        let proxy_client = &self.proxy_clients[index];
+        Ok(RoutedHttpClient {
+            client: proxy_client.client.clone(),
+            route: Rpow2RequestRoute::Proxy(proxy_client.url.clone()),
+        })
+    }
+
+    fn request_client_for_route(
+        &self,
+        route: &Rpow2RequestRoute,
+    ) -> Result<RoutedHttpClient, MiningError> {
+        match route {
+            Rpow2RequestRoute::Direct => Ok(RoutedHttpClient {
+                client: self.direct_client.clone(),
+                route: Rpow2RequestRoute::Direct,
+            }),
+            Rpow2RequestRoute::Proxy(proxy_url) => {
+                let client = if let Some(proxy_client) = self
+                    .proxy_clients
+                    .iter()
+                    .find(|proxy_client| proxy_client.url == *proxy_url)
+                {
+                    proxy_client.client.clone()
+                } else {
+                    build_http_client(&self.headers, Some(proxy_url.as_str()))?
+                };
+                Ok(RoutedHttpClient {
+                    client,
+                    route: Rpow2RequestRoute::Proxy(proxy_url.clone()),
+                })
+            }
+        }
+    }
+
+    fn client_ref<'a>(&'a self, request_client: &'a RoutedHttpClient) -> &'a Client {
+        &request_client.client
+    }
+}
+
+struct RoutedHttpClient {
+    client: Client,
+    route: Rpow2RequestRoute,
+}
+
+fn rpow_user_agent() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
+    }
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
+    }
+}
+
+fn rpow_sec_ch_ua_platform() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "\"macOS\""
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "\"Windows\""
+    }
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        "\"Linux\""
+    }
+}
+
+fn default_sec_fetch_site(base_url: &str, origin: Option<&str>) -> &'static str {
+    let Some(origin) = origin.map(str::trim).filter(|origin| !origin.is_empty()) else {
+        return "same-site";
+    };
+    let Ok(base_url) = Url::parse(base_url) else {
+        return "same-site";
+    };
+    let Ok(origin_url) = Url::parse(origin) else {
+        return "same-site";
+    };
+    if base_url.scheme() == origin_url.scheme()
+        && base_url.host_str() == origin_url.host_str()
+        && base_url.port_or_known_default() == origin_url.port_or_known_default()
+    {
+        "same-origin"
+    } else {
+        "same-site"
     }
 }
 
@@ -1145,5 +1547,36 @@ mod tests {
     #[test]
     fn decode_hex_rejects_odd_length_prefixes() {
         assert!(Rpow2Job::from_nonce_prefix_hex("abc", 1).is_err());
+    }
+
+    #[test]
+    fn rpow4_signer_uses_frontend_mint_message() {
+        use ed25519_dalek::Verifier as _;
+
+        let signer = Rpow4Signer::from_private_key(
+            "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+        )
+        .unwrap();
+        let public_key =
+            decode_hex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a").unwrap();
+        assert_eq!(
+            signer.public_key_base58(),
+            bs58::encode(&public_key).into_string()
+        );
+
+        let message = rpow4_signing_message("mint", "challenge-1", "42").unwrap();
+        assert_eq!(
+            message,
+            "rpow4.mint.v1\n{\"challenge_id\":\"challenge-1\",\"solution_nonce\":\"42\"}"
+        );
+
+        let signature_bytes = bs58::decode(signer.sign_mint("challenge-1", 42).unwrap())
+            .into_vec()
+            .unwrap();
+        let signature = ed25519_dalek::Signature::try_from(signature_bytes.as_slice()).unwrap();
+        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&bytes32(&public_key)).unwrap();
+        verifying_key
+            .verify(message.as_bytes(), &signature)
+            .expect("signature should verify against the derived public key");
     }
 }

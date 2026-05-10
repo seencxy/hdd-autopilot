@@ -13,8 +13,8 @@ use hdd_autopilot as _;
 use iana_time_zone as _;
 use mining::MiningError;
 use mining::rpow2::{
-    Rpow2Backend, Rpow2Challenge, Rpow2Client, Rpow2Job, Rpow2MineConfig, load_rpow2_proxy_file,
-    mine_rpow2, rpow2_meets_difficulty,
+    Rpow2Backend, Rpow2Challenge, Rpow2Client, Rpow2Job, Rpow2MineConfig, Rpow2RoutedChallenge,
+    Rpow4Signer, load_rpow2_proxy_file, mine_rpow2, rpow2_meets_difficulty,
 };
 use rand as _;
 use reqwest as _;
@@ -56,6 +56,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let target = ApiTarget::from_args(&args)?;
     let cookie = load_cookie(&args, target.network)?;
+    let mint_mode = MintMode::from_args(&args, target.network)?;
+    let proxy_concurrency = load_proxy_concurrency(&args, target.network)?;
     let (proxy_urls, proxy_file) = load_proxy_pool(&args, target.network)?;
     let client = Rpow2Client::with_base_url_origin_and_proxy_pool(
         &target.api_base,
@@ -77,6 +79,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     if let Ok(me) = client.me() {
+        validate_account_matches_mint_mode(&me, &mint_mode)?;
         println!("account: {}", me);
     }
     if let Ok(ledger) = client.ledger() {
@@ -85,12 +88,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     if args.loop_forever {
         if args.serial_api {
-            run_serial_loop(&client, &args)?;
+            run_serial_loop(&client, &args, &mint_mode)?;
         } else {
-            run_pipelined_loop(&client, &args)?;
+            run_pipelined_loop(&client, &args, mint_mode, proxy_concurrency)?;
         }
     } else {
-        run_single_round(&client, &args)?;
+        run_single_round(&client, &args, &mint_mode)?;
     }
     Ok(())
 }
@@ -131,6 +134,24 @@ fn load_proxy_pool(
         proxies.push(proxy);
     }
     Ok((proxies, proxy_file))
+}
+
+fn load_proxy_concurrency(
+    args: &Args,
+    network: RpowNetwork,
+) -> Result<Option<usize>, Box<dyn std::error::Error>> {
+    if let Some(concurrency) = args.proxy_concurrency {
+        return Ok(Some(concurrency));
+    }
+    if let Ok(value) =
+        env::var(network.proxy_concurrency_env()).or_else(|_| env::var("RPOW_PROXY_CONCURRENCY"))
+    {
+        let value = value.trim();
+        if !value.is_empty() {
+            return Ok(Some(value.parse()?));
+        }
+    }
+    Ok(None)
 }
 
 #[derive(Debug, Clone)]
@@ -180,6 +201,7 @@ impl ApiTarget {
 enum RpowNetwork {
     Rpow2,
     Rpow3,
+    Rpow4,
 }
 
 impl RpowNetwork {
@@ -187,7 +209,8 @@ impl RpowNetwork {
         match value {
             "rpow2" | "2" => Ok(Self::Rpow2),
             "rpow3" | "3" => Ok(Self::Rpow3),
-            _ => Err(format!("unknown network: {value}; expected rpow2 or rpow3").into()),
+            "rpow4" | "4" => Ok(Self::Rpow4),
+            _ => Err(format!("unknown network: {value}; expected rpow2, rpow3, or rpow4").into()),
         }
     }
 
@@ -195,6 +218,7 @@ impl RpowNetwork {
         match self {
             Self::Rpow2 => "rpow2",
             Self::Rpow3 => "rpow3",
+            Self::Rpow4 => "rpow4",
         }
     }
 
@@ -202,6 +226,7 @@ impl RpowNetwork {
         match self {
             Self::Rpow2 => "https://api.rpow2.com",
             Self::Rpow3 => "https://api.rpow3.com",
+            Self::Rpow4 => "https://rpow4.com",
         }
     }
 
@@ -209,6 +234,7 @@ impl RpowNetwork {
         match self {
             Self::Rpow2 => "https://rpow2.com",
             Self::Rpow3 => "https://rpow3.com",
+            Self::Rpow4 => "https://rpow4.com",
         }
     }
 
@@ -216,6 +242,7 @@ impl RpowNetwork {
         match self {
             Self::Rpow2 => DEFAULT_PROXY_FILE,
             Self::Rpow3 => "rpow3-proxies.txt",
+            Self::Rpow4 => "rpow4-proxies.txt",
         }
     }
 
@@ -223,6 +250,7 @@ impl RpowNetwork {
         match self {
             Self::Rpow2 => "RPOW2_COOKIE",
             Self::Rpow3 => "RPOW3_COOKIE",
+            Self::Rpow4 => "RPOW4_COOKIE",
         }
     }
 
@@ -230,6 +258,7 @@ impl RpowNetwork {
         match self {
             Self::Rpow2 => "RPOW2_API_BASE",
             Self::Rpow3 => "RPOW3_API_BASE",
+            Self::Rpow4 => "RPOW4_API_BASE",
         }
     }
 
@@ -237,6 +266,7 @@ impl RpowNetwork {
         match self {
             Self::Rpow2 => "RPOW2_ORIGIN",
             Self::Rpow3 => "RPOW3_ORIGIN",
+            Self::Rpow4 => "RPOW4_ORIGIN",
         }
     }
 
@@ -244,6 +274,7 @@ impl RpowNetwork {
         match self {
             Self::Rpow2 => "RPOW2_REFERER",
             Self::Rpow3 => "RPOW3_REFERER",
+            Self::Rpow4 => "RPOW4_REFERER",
         }
     }
 
@@ -251,6 +282,7 @@ impl RpowNetwork {
         match self {
             Self::Rpow2 => "RPOW2_PROXY",
             Self::Rpow3 => "RPOW3_PROXY",
+            Self::Rpow4 => "RPOW4_PROXY",
         }
     }
 
@@ -258,32 +290,143 @@ impl RpowNetwork {
         match self {
             Self::Rpow2 => "RPOW2_PROXY_FILE",
             Self::Rpow3 => "RPOW3_PROXY_FILE",
+            Self::Rpow4 => "RPOW4_PROXY_FILE",
+        }
+    }
+
+    fn proxy_concurrency_env(self) -> &'static str {
+        match self {
+            Self::Rpow2 => "RPOW2_PROXY_CONCURRENCY",
+            Self::Rpow3 => "RPOW3_PROXY_CONCURRENCY",
+            Self::Rpow4 => "RPOW4_PROXY_CONCURRENCY",
         }
     }
 }
 
-fn run_single_round(client: &Rpow2Client, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
-    let challenge = retry_online("challenge", || client.challenge())?;
-    let result = mine_challenge(&challenge, args)?;
-    let mint = mint_with_recovery(client, &challenge.challenge_id, result.nonce)?;
+#[derive(Debug, Clone)]
+enum MintMode {
+    Legacy,
+    Rpow4 { signer: Rpow4Signer },
+}
+
+impl MintMode {
+    fn from_args(args: &Args, network: RpowNetwork) -> Result<Self, Box<dyn std::error::Error>> {
+        if network != RpowNetwork::Rpow4 {
+            return Ok(Self::Legacy);
+        }
+        Ok(Self::Rpow4 {
+            signer: rpow4_signer_from_args(args)?,
+        })
+    }
+
+    fn mint(
+        &self,
+        client: &Rpow2Client,
+        challenge: &Rpow2Challenge,
+        solution_nonce: u64,
+        routed_challenge: &Rpow2RoutedChallenge,
+    ) -> Result<Value, MiningError> {
+        match self {
+            Self::Legacy => client.mint_via_route(
+                &challenge.challenge_id,
+                solution_nonce,
+                routed_challenge.route(),
+            ),
+            Self::Rpow4 { signer } => {
+                let signature = signer.sign_mint(&challenge.challenge_id, solution_nonce)?;
+                client.mint_rpow4_via_route(
+                    challenge,
+                    solution_nonce,
+                    &signature,
+                    routed_challenge.route(),
+                )
+            }
+        }
+    }
+}
+
+fn rpow4_signer_from_args(args: &Args) -> Result<Rpow4Signer, Box<dyn std::error::Error>> {
+    if let Some(private_key) = args
+        .rpow4_private_key
+        .clone()
+        .or_else(|| env::var("RPOW4_PRIVATE_KEY").ok())
+        .or_else(|| env::var("RPOW_PRIVATE_KEY").ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(Rpow4Signer::from_private_key(&private_key)?);
+    }
+    if let Some(mnemonic) = args
+        .rpow4_mnemonic
+        .clone()
+        .or_else(|| env::var("RPOW4_MNEMONIC").ok())
+        .or_else(|| env::var("RPOW_MNEMONIC").ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(Rpow4Signer::from_mnemonic(&mnemonic)?);
+    }
+    Err("rpow4 mint requires wallet signing secret; set RPOW4_PRIVATE_KEY/RPOW_PRIVATE_KEY or RPOW4_MNEMONIC/RPOW_MNEMONIC".into())
+}
+
+fn validate_account_matches_mint_mode(
+    me: &Value,
+    mint_mode: &MintMode,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let MintMode::Rpow4 { signer } = mint_mode else {
+        return Ok(());
+    };
+    let Some(account_pubkey) = me.get("pubkey").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    if account_pubkey != signer.public_key_base58() {
+        return Err(format!(
+            "RPOW4 signer pubkey {} does not match session pubkey {}",
+            signer.public_key_base58(),
+            account_pubkey
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn run_single_round(
+    client: &Rpow2Client,
+    args: &Args,
+    mint_mode: &MintMode,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let challenge = retry_online("challenge", || client.challenge_with_route())?;
+    let result = mine_challenge(challenge.challenge(), args)?;
+    let mint = mint_with_recovery(client, &challenge, result.nonce, mint_mode)?;
     println!("mint: {}", mint);
     Ok(())
 }
 
-fn run_serial_loop(client: &Rpow2Client, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+fn run_serial_loop(
+    client: &Rpow2Client,
+    args: &Args,
+    mint_mode: &MintMode,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!("api_mode=serial");
     loop {
-        run_single_round(client, args)?;
+        run_single_round(client, args, mint_mode)?;
     }
 }
 
-fn run_pipelined_loop(client: &Rpow2Client, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+fn run_pipelined_loop(
+    client: &Rpow2Client,
+    args: &Args,
+    mint_mode: MintMode,
+    proxy_concurrency: Option<usize>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let prefetch_depth = args
         .challenge_prefetch
+        .or(proxy_concurrency)
         .unwrap_or_else(default_challenge_prefetch)
         .max(1);
     let mint_workers = args
         .mint_workers
+        .or(proxy_concurrency)
         .unwrap_or_else(default_mint_workers)
         .max(1);
     println!(
@@ -292,16 +435,16 @@ fn run_pipelined_loop(client: &Rpow2Client, args: &Args) -> Result<(), Box<dyn s
     );
 
     let challenges = spawn_challenge_prefetchers(client.clone(), prefetch_depth);
-    let mint_sender = spawn_mint_workers(client.clone(), mint_workers);
+    let mint_sender = spawn_mint_workers(client.clone(), mint_workers, mint_mode);
 
     loop {
         let challenge = challenges
             .recv()
             .map_err(|_| "challenge prefetchers stopped unexpectedly")?;
-        let result = mine_challenge(&challenge, args)?;
+        let result = mine_challenge(challenge.challenge(), args)?;
         mint_sender
             .send(MintJob {
-                challenge_id: challenge.challenge_id,
+                challenge,
                 solution_nonce: result.nonce,
             })
             .map_err(|_| "mint workers stopped unexpectedly")?;
@@ -376,14 +519,14 @@ fn solve_job(
 
 #[derive(Debug, Clone)]
 struct MintJob {
-    challenge_id: String,
+    challenge: Rpow2RoutedChallenge,
     solution_nonce: u64,
 }
 
 fn spawn_challenge_prefetchers(
     client: Rpow2Client,
     prefetch_depth: usize,
-) -> Receiver<Rpow2Challenge> {
+) -> Receiver<Rpow2RoutedChallenge> {
     let (sender, receiver) = sync_channel(prefetch_depth);
     let recent_challenges = Arc::new(Mutex::new(RecentChallengeIds::new(RECENT_CHALLENGE_LIMIT)));
     for worker_index in 0..prefetch_depth {
@@ -393,18 +536,19 @@ fn spawn_challenge_prefetchers(
         thread::spawn(move || {
             let label = format!("challenge-prefetch-{worker_index}");
             loop {
-                match retry_online(&label, || client.challenge()) {
+                match retry_online(&label, || client.challenge_with_route()) {
                     Ok(challenge) => {
                         let is_new_challenge = {
                             let mut recent_challenges = recent_challenges
                                 .lock()
                                 .expect("recent challenge lock poisoned");
-                            recent_challenges.insert(challenge.challenge_id.clone())
+                            recent_challenges.insert(challenge.challenge().challenge_id.clone())
                         };
                         if !is_new_challenge {
                             eprintln!(
                                 "{} skipped duplicate challenge={}",
-                                label, challenge.challenge_id
+                                label,
+                                challenge.challenge().challenge_id
                             );
                             thread::sleep(Duration::from_secs(1));
                             continue;
@@ -460,12 +604,17 @@ impl RecentChallengeIds {
     }
 }
 
-fn spawn_mint_workers(client: Rpow2Client, worker_count: usize) -> SyncSender<MintJob> {
+fn spawn_mint_workers(
+    client: Rpow2Client,
+    worker_count: usize,
+    mint_mode: MintMode,
+) -> SyncSender<MintJob> {
     let (sender, receiver) = sync_channel::<MintJob>(worker_count.saturating_mul(4).max(1));
     let receiver = Arc::new(Mutex::new(receiver));
     for worker_index in 0..worker_count {
         let client = client.clone();
         let receiver = Arc::clone(&receiver);
+        let mint_mode = mint_mode.clone();
         thread::spawn(move || {
             loop {
                 let job = {
@@ -475,12 +624,12 @@ fn spawn_mint_workers(client: Rpow2Client, worker_count: usize) -> SyncSender<Mi
                 let Ok(job) = job else {
                     break;
                 };
-                match mint_with_recovery(&client, &job.challenge_id, job.solution_nonce) {
+                match mint_with_recovery(&client, &job.challenge, job.solution_nonce, &mint_mode) {
                     Ok(value) => println!("mint: {}", value),
                     Err(error) => eprintln!(
                         "mint worker {} failed for challenge={}: {}",
                         worker_index,
-                        job.challenge_id,
+                        job.challenge.challenge().challenge_id,
                         error_chain_to_string(&error)
                     ),
                 }
@@ -492,21 +641,23 @@ fn spawn_mint_workers(client: Rpow2Client, worker_count: usize) -> SyncSender<Mi
 
 fn mint_with_recovery(
     client: &Rpow2Client,
-    challenge_id: &str,
+    routed_challenge: &Rpow2RoutedChallenge,
     solution_nonce: u64,
+    mint_mode: &MintMode,
 ) -> Result<Value, MiningError> {
     let mut attempt = 1u32;
+    let challenge = routed_challenge.challenge();
     loop {
-        match client.mint(challenge_id, solution_nonce) {
+        match mint_mode.mint(client, challenge, solution_nonce, routed_challenge) {
             Ok(value) => return Ok(value),
             Err(error) if is_already_claimed_error(&error) => {
                 eprintln!(
                     "mint already claimed for challenge={}; treating as accepted",
-                    challenge_id
+                    challenge.challenge_id
                 );
                 return Ok(json!({
                     "status": "already_claimed",
-                    "challenge_id": challenge_id,
+                    "challenge_id": challenge.challenge_id,
                     "solution_nonce": solution_nonce.to_string()
                 }));
             }
@@ -659,6 +810,8 @@ fn error_chain_to_string(error: &(dyn Error + 'static)) -> String {
 #[derive(Debug, Default)]
 struct Args {
     cookie: Option<String>,
+    rpow4_private_key: Option<String>,
+    rpow4_mnemonic: Option<String>,
     network: Option<RpowNetwork>,
     api_base: Option<String>,
     origin: Option<String>,
@@ -679,6 +832,7 @@ struct Args {
     gpu_no_early_exit: bool,
     challenge_prefetch: Option<usize>,
     mint_workers: Option<usize>,
+    proxy_concurrency: Option<usize>,
     serial_api: bool,
 }
 
@@ -692,12 +846,23 @@ impl Args {
                     index += 1;
                     args.cookie = Some(next_value(&raw, index, "--cookie")?.to_string());
                 }
+                "--rpow4-private-key" => {
+                    index += 1;
+                    args.rpow4_private_key =
+                        Some(next_value(&raw, index, "--rpow4-private-key")?.to_string());
+                }
+                "--rpow4-mnemonic" => {
+                    index += 1;
+                    args.rpow4_mnemonic =
+                        Some(next_value(&raw, index, "--rpow4-mnemonic")?.to_string());
+                }
                 "--network" => {
                     index += 1;
                     args.network = Some(RpowNetwork::parse(next_value(&raw, index, "--network")?)?);
                 }
                 "--rpow2" => args.network = Some(RpowNetwork::Rpow2),
                 "--rpow3" => args.network = Some(RpowNetwork::Rpow3),
+                "--rpow4" => args.network = Some(RpowNetwork::Rpow4),
                 "--api-base" => {
                     index += 1;
                     args.api_base = Some(next_value(&raw, index, "--api-base")?.to_string());
@@ -772,6 +937,11 @@ impl Args {
                     index += 1;
                     args.mint_workers = Some(next_value(&raw, index, "--mint-workers")?.parse()?);
                 }
+                "--proxy-concurrency" => {
+                    index += 1;
+                    args.proxy_concurrency =
+                        Some(next_value(&raw, index, "--proxy-concurrency")?.parse()?);
+                }
                 "-h" | "--help" => args.help = true,
                 other => return Err(format!("unknown argument: {other}").into()),
             }
@@ -797,19 +967,26 @@ fn next_value<'a>(
 fn print_usage() {
     println!(
         "Usage:
-  rpow2mine --cookie '<cookie-header>' [--network rpow2|rpow3] [--api-base <url>] [--proxy <url>] [--proxy-file <path>] [--loop] [--serial-api] [--cpu-only] [--gpu-device <index>] [--gpu-batch-size <hashes>] [--gpu-threads-per-block <n>] [--gpu-nonces-per-thread <n>] [--gpu-max-blocks <n>] [--gpu-no-early-exit] [--challenge-prefetch <n>] [--mint-workers <n>]
+  rpow2mine --cookie '<cookie-header>' [--network rpow2|rpow3|rpow4] [--rpow4-private-key <key>|--rpow4-mnemonic <words>] [--api-base <url>] [--proxy <url>] [--proxy-file <path>] [--proxy-concurrency <n>] [--loop] [--serial-api] [--cpu-only] [--gpu-device <index>] [--gpu-batch-size <hashes>] [--gpu-threads-per-block <n>] [--gpu-nonces-per-thread <n>] [--gpu-max-blocks <n>] [--gpu-no-early-exit] [--challenge-prefetch <n>] [--mint-workers <n>]
   rpow2mine --prefix <hex> --difficulty <bits> [--cpu-only] [--gpu-device <index>] [--gpu-batch-size <hashes>]
 
 Environment:
   RPOW2_COOKIE   Cookie header copied from an authenticated rpow2.com browser session
   RPOW3_COOKIE   Cookie header copied from an authenticated rpow3.com browser session
+  RPOW4_COOKIE   Cookie header copied from an authenticated rpow4.com browser session
   RPOW_COOKIE    Compatible cookie alias
-  RPOW2_API_BASE/RPOW3_API_BASE/RPOW_API_BASE override API base URL
-  RPOW2_PROXY/RPOW3_PROXY/RPOW_PROXY HTTP/HTTPS proxy URL for API requests
-  RPOW2_PROXY_FILE/RPOW3_PROXY_FILE/RPOW_PROXY_FILE proxy pool file
+  RPOW4_PRIVATE_KEY/RPOW_PRIVATE_KEY RPOW4 wallet private key or seed, base58 or hex
+  RPOW4_MNEMONIC/RPOW_MNEMONIC       RPOW4 wallet mnemonic
+  RPOW2_API_BASE/RPOW3_API_BASE/RPOW4_API_BASE/RPOW_API_BASE override API base URL
+  RPOW2_PROXY/RPOW3_PROXY/RPOW4_PROXY/RPOW_PROXY HTTP/HTTPS proxy URL for API requests
+  RPOW2_PROXY_FILE/RPOW3_PROXY_FILE/RPOW4_PROXY_FILE/RPOW_PROXY_FILE proxy pool file
+  RPOW2_PROXY_CONCURRENCY/RPOW3_PROXY_CONCURRENCY/RPOW4_PROXY_CONCURRENCY/RPOW_PROXY_CONCURRENCY proxy API concurrency
 
 Notes:
   --network rpow3 defaults to https://api.rpow3.com with Origin/Referer https://rpow3.com
+  --network rpow4 defaults to https://rpow4.com with Origin/Referer https://rpow4.com
+  RPOW4 mint requires both an authenticated Cookie and the matching wallet signing secret
+  --proxy-concurrency sets challenge prefetch and mint workers unless they are provided explicitly
   proxy files accept one proxy URL per line; empty lines and # comments are ignored
   Windows GPU mining uses CUDA and defaults to batch 268435456, 512 threads/block, 4 nonces/thread
   --gpu-batch-size 0 enables automatic GPU batch tuning

@@ -49,6 +49,11 @@ crossterm = "0.29"
 iana-time-zone = "0.1"
 rand = "0.9"
 argon2 = "0.5"
+bip39 = "2.2"
+bs58 = "0.5"
+ed25519-dalek = "2.2"
+hmac = "0.12"
+sha2 = "0.10"
 time = { version = "0.3", default-features = false, features = ["std", "local-offset"] }
 unicode-width = "0.2"
 

@@ -204,6 +204,7 @@ impl ApiTarget {
 enum RpowNetwork {
     Rpow2,
     Rpow3,
+    Rpow4,
 }
 
 impl RpowNetwork {
@@ -211,7 +212,8 @@ impl RpowNetwork {
         match value {
             "rpow2" | "2" => Ok(Self::Rpow2),
             "rpow3" | "3" => Ok(Self::Rpow3),
-            _ => Err(format!("unknown network: {value}; expected rpow2 or rpow3").into()),
+            "rpow4" | "4" => Ok(Self::Rpow4),
+            _ => Err(format!("unknown network: {value}; expected rpow2, rpow3, or rpow4").into()),
         }
     }
 
@@ -219,6 +221,7 @@ impl RpowNetwork {
         match self {
             Self::Rpow2 => "rpow2",
             Self::Rpow3 => "rpow3",
+            Self::Rpow4 => "rpow4",
         }
     }
 
@@ -226,6 +229,7 @@ impl RpowNetwork {
         match self {
             Self::Rpow2 => "https://api.rpow2.com",
             Self::Rpow3 => "https://api.rpow3.com",
+            Self::Rpow4 => "https://rpow4.com",
         }
     }
 
@@ -233,6 +237,7 @@ impl RpowNetwork {
         match self {
             Self::Rpow2 => "https://rpow2.com",
             Self::Rpow3 => "https://rpow3.com",
+            Self::Rpow4 => "https://rpow4.com",
         }
     }
 
@@ -240,6 +245,7 @@ impl RpowNetwork {
         match self {
             Self::Rpow2 => DEFAULT_PROXY_FILE,
             Self::Rpow3 => "rpow3-proxies.txt",
+            Self::Rpow4 => "rpow4-proxies.txt",
         }
     }
 
@@ -247,6 +253,7 @@ impl RpowNetwork {
         match self {
             Self::Rpow2 => "RPOW2_COOKIE",
             Self::Rpow3 => "RPOW3_COOKIE",
+            Self::Rpow4 => "RPOW4_COOKIE",
         }
     }
 
@@ -254,6 +261,7 @@ impl RpowNetwork {
         match self {
             Self::Rpow2 => "RPOW2_API_BASE",
             Self::Rpow3 => "RPOW3_API_BASE",
+            Self::Rpow4 => "RPOW4_API_BASE",
         }
     }
 
@@ -261,6 +269,7 @@ impl RpowNetwork {
         match self {
             Self::Rpow2 => "RPOW2_ORIGIN",
             Self::Rpow3 => "RPOW3_ORIGIN",
+            Self::Rpow4 => "RPOW4_ORIGIN",
         }
     }
 
@@ -268,6 +277,7 @@ impl RpowNetwork {
         match self {
             Self::Rpow2 => "RPOW2_REFERER",
             Self::Rpow3 => "RPOW3_REFERER",
+            Self::Rpow4 => "RPOW4_REFERER",
         }
     }
 
@@ -275,6 +285,7 @@ impl RpowNetwork {
         match self {
             Self::Rpow2 => "RPOW2_PROXY",
             Self::Rpow3 => "RPOW3_PROXY",
+            Self::Rpow4 => "RPOW4_PROXY",
         }
     }
 
@@ -282,6 +293,7 @@ impl RpowNetwork {
         match self {
             Self::Rpow2 => "RPOW2_PROXY_FILE",
             Self::Rpow3 => "RPOW3_PROXY_FILE",
+            Self::Rpow4 => "RPOW4_PROXY_FILE",
         }
     }
 }
@@ -371,6 +383,7 @@ impl Args {
                 }
                 "--rpow2" => args.network = Some(RpowNetwork::Rpow2),
                 "--rpow3" => args.network = Some(RpowNetwork::Rpow3),
+                "--rpow4" => args.network = Some(RpowNetwork::Rpow4),
                 "--api-base" => {
                     index += 1;
                     args.api_base = Some(next_value(&raw, index, "--api-base")?.to_string());
@@ -450,15 +463,16 @@ fn error_chain_to_string(error: &(dyn Error + 'static)) -> String {
 fn print_usage() {
     println!(
         "Usage:
-  rpow2-api-probe [--cookie '<cookie-header>'] [--network rpow2|rpow3] [--api-base <url>] [--proxy <url>] [--proxy-file <path>] [--endpoint me|ledger|challenge] [--requests <n>] [--concurrency <n>]
+  rpow2-api-probe [--cookie '<cookie-header>'] [--network rpow2|rpow3|rpow4] [--api-base <url>] [--proxy <url>] [--proxy-file <path>] [--endpoint me|ledger|challenge] [--requests <n>] [--concurrency <n>]
 
 Environment:
   RPOW2_COOKIE   Cookie header copied from an authenticated rpow2.com browser session
   RPOW3_COOKIE   Cookie header copied from an authenticated rpow3.com browser session
+  RPOW4_COOKIE   Cookie header copied from an authenticated rpow4.com browser session
   RPOW_COOKIE    Compatible cookie env alias
-  RPOW2_API_BASE/RPOW3_API_BASE/RPOW_API_BASE override API base URL
-  RPOW2_PROXY/RPOW3_PROXY/RPOW_PROXY HTTP/HTTPS proxy URL for API requests
-  RPOW2_PROXY_FILE/RPOW3_PROXY_FILE/RPOW_PROXY_FILE proxy pool file
+  RPOW2_API_BASE/RPOW3_API_BASE/RPOW4_API_BASE/RPOW_API_BASE override API base URL
+  RPOW2_PROXY/RPOW3_PROXY/RPOW4_PROXY/RPOW_PROXY HTTP/HTTPS proxy URL for API requests
+  RPOW2_PROXY_FILE/RPOW3_PROXY_FILE/RPOW4_PROXY_FILE/RPOW_PROXY_FILE proxy pool file
 
 Defaults:
   endpoint       me

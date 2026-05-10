@@ -148,6 +148,23 @@ POST https://api.rpow2.com/mint
 RPOW2_COOKIE='从已登录浏览器请求里复制的 Cookie 请求头' cargo run --release --bin rpow2mine
 ```
 
+同一入口也支持 RPOW3/RPOW4。RPOW4 的接口默认使用 `https://rpow4.com/challenge` 和 `https://rpow4.com/mint`；它的 `/mint` 需要浏览器会话 Cookie 加上匹配账号的钱包签名密钥：
+
+```bash
+export RPOW4_COOKIE='从已登录浏览器请求里复制的 Cookie 请求头'
+export RPOW4_MNEMONIC='钱包助记词'
+# 或者 export RPOW4_PRIVATE_KEY='钱包私钥/seed，base58 或 hex'
+cargo run --release --bin rpow2mine -- --network rpow4
+```
+
+RPOW4 代理池默认读取 `rpow4-proxies.txt`，也可用 `RPOW4_PROXY_FILE` 或 `--proxy-file` 指定。开启代理并发时，challenge 会轮询代理池，mint 会固定回到获取该 challenge 的同一个代理：
+
+```bash
+export RPOW4_PROXY_FILE=rpow4-proxies.txt
+export RPOW4_PROXY_CONCURRENCY=8
+cargo run --release --bin rpow2mine -- --network rpow4 --loop
+```
+
 Windows 构建启用 CUDA 后会优先用 NVIDIA GPU；macOS 构建启用 Metal 后会优先用 Metal GPU；失败或不可用时回退 CPU。RPOW2 的 GPU 路径在 GPU 命中后会用 CPU 重新验算 digest 再提交。Windows CUDA 默认直接使用 `2147483648` hashes 的大 batch，避免启动后先跑小 batch；CUDA 路径会复用持久计算会话，避免每个 batch 重新分配显存。也可以离线验证 solver：
 
 ```bash
