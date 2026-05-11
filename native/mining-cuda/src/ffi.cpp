@@ -132,6 +132,30 @@ void fill_rpow2_mine_result(const app::Rpow2CudaBatchResult& mined,
     }
 }
 
+void fill_h98hash_mine_result(const app::H98HashCudaBatchResult& mined,
+                              mining_cuda_h98hash_mine_result* result) {
+    result->found = mined.found;
+    result->nonce_tail = mined.nonce_tail;
+    result->attempts = mined.attempts;
+    std::fill(std::begin(result->digest_hex), std::end(result->digest_hex), '\0');
+    if (mined.found) {
+        const auto digest = app::hex_encode(mined.digest.data(), mined.digest.size());
+        std::strncpy(result->digest_hex, digest.c_str(), sizeof(result->digest_hex) - 1);
+    }
+}
+
+void fill_h256hash_mine_result(const app::H256HashCudaBatchResult& mined,
+                               mining_cuda_h256hash_mine_result* result) {
+    result->found = mined.found;
+    result->nonce = mined.nonce;
+    result->attempts = mined.attempts;
+    std::fill(std::begin(result->digest_hex), std::end(result->digest_hex), '\0');
+    if (mined.found) {
+        const auto digest = app::hex_encode(mined.digest.data(), mined.digest.size());
+        std::strncpy(result->digest_hex, digest.c_str(), sizeof(result->digest_hex) - 1);
+    }
+}
+
 void fill_device_info(std::size_t device_index, mining_cuda_device_info* result) {
     argon2::cuda::GlobalContext global;
     const auto& devices = global.getAllDevices();
@@ -194,6 +218,49 @@ struct mining_cuda_rpow2_session {
 	                  config.early_exit) {
 	    }
 	};
+
+struct mining_cuda_h98hash_session {
+    app::H98HashCudaSession session;
+
+    mining_cuda_h98hash_session(std::size_t device_index,
+                                const mining_cuda_h98hash_job& job,
+                                const mining_cuda_rpow2_solver_config& config,
+                                std::uint64_t start_nonce)
+        : session(device_index,
+                  job.challenge_ptr,
+                  job.challenge_len,
+                  job.nonce_prefix_ptr,
+                  job.nonce_prefix_len,
+                  job.difficulty_bits,
+                  config.batch_size,
+                  start_nonce,
+                  config.threads_per_block,
+                  config.nonces_per_thread,
+                  config.max_blocks,
+                  config.early_exit) {
+    }
+};
+
+struct mining_cuda_h256hash_session {
+    app::H256HashCudaSession session;
+
+    mining_cuda_h256hash_session(std::size_t device_index,
+                                 const mining_cuda_h256hash_job& job,
+                                 const mining_cuda_rpow2_solver_config& config,
+                                 std::uint64_t start_nonce)
+        : session(device_index,
+                  job.challenge_ptr,
+                  job.challenge_len,
+                  job.target_ptr,
+                  job.target_len,
+                  config.batch_size,
+                  start_nonce,
+                  config.threads_per_block,
+                  config.nonces_per_thread,
+                  config.max_blocks,
+                  config.early_exit) {
+    }
+};
 
 bool mining_cuda_is_available() {
     try {
@@ -472,6 +539,151 @@ bool mining_cuda_rpow2_session_mine_next_batch(
 	        return false;
 	    }
 	}
+
+bool mining_cuda_h98hash_mine_batch(
+    std::size_t device_index,
+    const mining_cuda_h98hash_job* job,
+    const mining_cuda_rpow2_solver_config* config,
+    std::uint64_t start_nonce,
+    mining_cuda_h98hash_mine_result* result) {
+    if (job == nullptr || config == nullptr || result == nullptr) {
+        g_last_error = "h98hash mine_batch parameter is null";
+        return false;
+    }
+    try {
+        clear_last_error();
+        const auto mined = app::mine_h98hash_cuda_batch(
+            device_index,
+            job->challenge_ptr,
+            job->challenge_len,
+            job->nonce_prefix_ptr,
+            job->nonce_prefix_len,
+            job->difficulty_bits,
+            config->batch_size,
+            start_nonce,
+            config->threads_per_block,
+            config->nonces_per_thread,
+            config->max_blocks,
+            config->early_exit);
+        fill_h98hash_mine_result(mined, result);
+        return true;
+    } catch (const std::exception& error) {
+        set_last_error(error);
+        return false;
+    }
+}
+
+mining_cuda_h98hash_session* mining_cuda_h98hash_session_create(
+    std::size_t device_index,
+    const mining_cuda_h98hash_job* job,
+    const mining_cuda_rpow2_solver_config* config,
+    std::uint64_t start_nonce) {
+    if (job == nullptr || config == nullptr) {
+        g_last_error = "h98hash session_create parameter is null";
+        return nullptr;
+    }
+    try {
+        clear_last_error();
+        return new mining_cuda_h98hash_session(device_index, *job, *config, start_nonce);
+    } catch (const std::exception& error) {
+        set_last_error(error);
+        return nullptr;
+    }
+}
+
+bool mining_cuda_h98hash_session_mine_next_batch(
+    mining_cuda_h98hash_session* session,
+    mining_cuda_h98hash_mine_result* result) {
+    if (session == nullptr || result == nullptr) {
+        g_last_error = "h98hash session_mine_next_batch parameter is null";
+        return false;
+    }
+    try {
+        clear_last_error();
+        const auto mined = session->session.mine_next_batch();
+        fill_h98hash_mine_result(mined, result);
+        return true;
+    } catch (const std::exception& error) {
+        set_last_error(error);
+        return false;
+    }
+}
+
+void mining_cuda_h98hash_session_destroy(mining_cuda_h98hash_session* session) {
+    delete session;
+}
+
+bool mining_cuda_h256hash_mine_batch(
+    std::size_t device_index,
+    const mining_cuda_h256hash_job* job,
+    const mining_cuda_rpow2_solver_config* config,
+    std::uint64_t start_nonce,
+    mining_cuda_h256hash_mine_result* result) {
+    if (job == nullptr || config == nullptr || result == nullptr) {
+        g_last_error = "h256hash mine_batch parameter is null";
+        return false;
+    }
+    try {
+        clear_last_error();
+        const auto mined = app::mine_h256hash_cuda_batch(
+            device_index,
+            job->challenge_ptr,
+            job->challenge_len,
+            job->target_ptr,
+            job->target_len,
+            config->batch_size,
+            start_nonce,
+            config->threads_per_block,
+            config->nonces_per_thread,
+            config->max_blocks,
+            config->early_exit);
+        fill_h256hash_mine_result(mined, result);
+        return true;
+    } catch (const std::exception& error) {
+        set_last_error(error);
+        return false;
+    }
+}
+
+mining_cuda_h256hash_session* mining_cuda_h256hash_session_create(
+    std::size_t device_index,
+    const mining_cuda_h256hash_job* job,
+    const mining_cuda_rpow2_solver_config* config,
+    std::uint64_t start_nonce) {
+    if (job == nullptr || config == nullptr) {
+        g_last_error = "h256hash session_create parameter is null";
+        return nullptr;
+    }
+    try {
+        clear_last_error();
+        return new mining_cuda_h256hash_session(device_index, *job, *config, start_nonce);
+    } catch (const std::exception& error) {
+        set_last_error(error);
+        return nullptr;
+    }
+}
+
+bool mining_cuda_h256hash_session_mine_next_batch(
+    mining_cuda_h256hash_session* session,
+    mining_cuda_h256hash_mine_result* result) {
+    if (session == nullptr || result == nullptr) {
+        g_last_error = "h256hash session_mine_next_batch parameter is null";
+        return false;
+    }
+    try {
+        clear_last_error();
+        const auto mined = session->session.mine_next_batch();
+        fill_h256hash_mine_result(mined, result);
+        return true;
+    } catch (const std::exception& error) {
+        set_last_error(error);
+        return false;
+    }
+}
+
+void mining_cuda_h256hash_session_destroy(mining_cuda_h256hash_session* session) {
+    delete session;
+}
 
 	bool mining_argon2id_hash_raw(
     const std::uint8_t* password_ptr,

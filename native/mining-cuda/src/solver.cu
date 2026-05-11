@@ -433,6 +433,21 @@ struct Rpow2CudaDeviceResult {
     std::uint32_t digest_words[8];
 };
 
+struct H98HashCudaKernelParams {
+    std::uint32_t difficulty_bits;
+    std::uint32_t padding;
+    std::uint32_t challenge_words[4];
+    std::uint32_t nonce_prefix_words[2];
+    unsigned long long start_nonce;
+    unsigned long long batch_size;
+};
+
+struct H98HashCudaDeviceResult {
+    unsigned int found;
+    unsigned long long nonce_tail;
+    std::uint32_t digest_words[8];
+};
+
 	__constant__ std::uint32_t kRpow2Sha256K[64] = {
 	    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
     0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -585,6 +600,36 @@ struct Rpow2CudaDeviceResult {
 	        return h7 == 0u;
 	    }
 	    return rpow2_trailing_zero_bits(h0, h1, h2, h3, h4, h5, h6, h7) >= difficulty_bits;
+	}
+
+	__device__ __forceinline__ bool h98hash_meets_difficulty_words(std::uint32_t h0,
+	                                                               std::uint32_t h1,
+	                                                               std::uint32_t h2,
+	                                                               std::uint32_t h3,
+	                                                               std::uint32_t h4,
+	                                                               std::uint32_t h5,
+	                                                               std::uint32_t h6,
+	                                                               std::uint32_t h7,
+	                                                               std::uint32_t difficulty_bits) {
+	    const std::uint32_t words[8] = {h0, h1, h2, h3, h4, h5, h6, h7};
+	    if (difficulty_bits == 0u) {
+	        return true;
+	    }
+	    if (difficulty_bits > 256u) {
+	        return false;
+	    }
+	    const std::uint32_t full_words = difficulty_bits / 32u;
+	    const std::uint32_t partial_bits = difficulty_bits % 32u;
+	    for (std::uint32_t index = 0; index < full_words; ++index) {
+	        if (words[index] != 0u) {
+	            return false;
+	        }
+	    }
+	    if (partial_bits == 0u) {
+	        return true;
+	    }
+	    const std::uint32_t mask = 0xffffffffu << (32u - partial_bits);
+	    return (words[full_words] & mask) == 0u;
 	}
 
 	__device__ __forceinline__ void rpow2_compress_block(std::uint32_t* h0,
@@ -860,6 +905,45 @@ struct Rpow2CudaDeviceResult {
 		    *h7 = 0x5be0cd19u + h;
 		}
 
+		__device__ __forceinline__ void h98hash_hash_nonce(const H98HashCudaKernelParams& params,
+		                                                   unsigned long long nonce_tail,
+		                                                   std::uint32_t* h0,
+		                                                   std::uint32_t* h1,
+		                                                   std::uint32_t* h2,
+		                                                   std::uint32_t* h3,
+		                                                   std::uint32_t* h4,
+		                                                   std::uint32_t* h5,
+		                                                   std::uint32_t* h6,
+		                                                   std::uint32_t* h7) {
+		    *h0 = 0x6a09e667u;
+		    *h1 = 0xbb67ae85u;
+		    *h2 = 0x3c6ef372u;
+		    *h3 = 0xa54ff53au;
+		    *h4 = 0x510e527fu;
+		    *h5 = 0x9b05688cu;
+		    *h6 = 0x1f83d9abu;
+		    *h7 = 0x5be0cd19u;
+
+		    std::uint32_t w[16];
+		    w[0] = params.challenge_words[0];
+		    w[1] = params.challenge_words[1];
+		    w[2] = params.challenge_words[2];
+		    w[3] = params.challenge_words[3];
+		    w[4] = params.nonce_prefix_words[0];
+		    w[5] = params.nonce_prefix_words[1];
+		    w[6] = static_cast<std::uint32_t>(nonce_tail >> 32);
+		    w[7] = static_cast<std::uint32_t>(nonce_tail);
+		    w[8] = 0x80000000u;
+		    w[9] = 0u;
+		    w[10] = 0u;
+		    w[11] = 0u;
+		    w[12] = 0u;
+		    w[13] = 0u;
+		    w[14] = 0u;
+		    w[15] = 256u;
+		    rpow2_compress_block(h0, h1, h2, h3, h4, h5, h6, h7, w);
+		}
+
 			template <unsigned int NoncesPerThread, bool EarlyExit>
 			__global__ __launch_bounds__(512, 2) void rpow2_mine_kernel(Rpow2CudaKernelParams params,
 			                                                            Rpow2CudaDeviceResult* result) {
@@ -953,6 +1037,60 @@ struct Rpow2CudaDeviceResult {
 		            if (rpow2_meets_difficulty_words(h0, h1, h2, h3, h4, h5, h6, h7, params.difficulty_bits)) {
 		                if (atomicCAS(&result->found, 0u, 1u) == 0u) {
 		                    result->nonce = nonce;
+		                    result->digest_words[0] = h0;
+		                    result->digest_words[1] = h1;
+		                    result->digest_words[2] = h2;
+		                    result->digest_words[3] = h3;
+		                    result->digest_words[4] = h4;
+		                    result->digest_words[5] = h5;
+		                    result->digest_words[6] = h6;
+		                    result->digest_words[7] = h7;
+		                }
+		                return;
+		            }
+		        }
+		    }
+		}
+
+			template <unsigned int NoncesPerThread, bool EarlyExit>
+			__global__ __launch_bounds__(512, 2) void h98hash_mine_kernel(H98HashCudaKernelParams params,
+			                                                              H98HashCudaDeviceResult* result) {
+		    const unsigned long long thread_id = static_cast<unsigned long long>(blockIdx.x)
+		        * static_cast<unsigned long long>(blockDim.x)
+		        + static_cast<unsigned long long>(threadIdx.x);
+		    const unsigned long long thread_stride = static_cast<unsigned long long>(gridDim.x)
+		        * static_cast<unsigned long long>(blockDim.x);
+		    const unsigned long long group_stride = thread_stride
+		        * static_cast<unsigned long long>(NoncesPerThread);
+		    const volatile unsigned int* found_flag =
+		        reinterpret_cast<const volatile unsigned int*>(&result->found);
+
+		    for (unsigned long long group_offset = thread_id * static_cast<unsigned long long>(NoncesPerThread);
+		         group_offset < params.batch_size;
+		         group_offset += group_stride) {
+		        if (EarlyExit && *found_flag != 0u) {
+		            return;
+		        }
+#pragma unroll
+		        for (unsigned int item = 0; item < NoncesPerThread; ++item) {
+		            const unsigned long long offset = group_offset + static_cast<unsigned long long>(item);
+		            if (offset >= params.batch_size) {
+		                return;
+		            }
+		            const unsigned long long nonce_tail = params.start_nonce + offset;
+		            std::uint32_t h0;
+		            std::uint32_t h1;
+		            std::uint32_t h2;
+		            std::uint32_t h3;
+		            std::uint32_t h4;
+		            std::uint32_t h5;
+		            std::uint32_t h6;
+		            std::uint32_t h7;
+		            h98hash_hash_nonce(params, nonce_tail, &h0, &h1, &h2, &h3, &h4, &h5, &h6, &h7);
+
+		            if (h98hash_meets_difficulty_words(h0, h1, h2, h3, h4, h5, h6, h7, params.difficulty_bits)) {
+		                if (atomicCAS(&result->found, 0u, 1u) == 0u) {
+		                    result->nonce_tail = nonce_tail;
 		                    result->digest_words[0] = h0;
 		                    result->digest_words[1] = h1;
 		                    result->digest_words[2] = h2;
@@ -1103,6 +1241,13 @@ void digest_words_to_bytes(const std::uint32_t words[8], std::array<std::uint8_t
     }
 }
 
+std::uint32_t read_be32(const std::uint8_t* bytes) {
+    return (static_cast<std::uint32_t>(bytes[0]) << 24)
+        | (static_cast<std::uint32_t>(bytes[1]) << 16)
+        | (static_cast<std::uint32_t>(bytes[2]) << 8)
+        | static_cast<std::uint32_t>(bytes[3]);
+}
+
 } // namespace
 
 	Rpow2CudaSession::Rpow2CudaSession(std::size_t device_index,
@@ -1170,6 +1315,79 @@ void digest_words_to_bytes(const std::uint32_t words[8], std::array<std::uint8_t
 	}
 
 Rpow2CudaSession::~Rpow2CudaSession() {
+	    if (device_result_ != nullptr) {
+	        cudaFree(device_result_);
+	        device_result_ = nullptr;
+	    }
+	}
+
+	H98HashCudaSession::H98HashCudaSession(std::size_t device_index,
+	                                       const std::uint8_t* challenge,
+	                                       std::size_t challenge_len,
+	                                       const std::uint8_t* nonce_prefix,
+	                                       std::size_t nonce_prefix_len,
+	                                       std::uint32_t difficulty_bits,
+	                                       std::uint64_t batch_size,
+	                                       std::uint64_t start_nonce,
+	                                       std::uint32_t threads_per_block,
+	                                       std::uint32_t nonces_per_thread,
+	                                       std::uint32_t max_blocks,
+	                                       bool early_exit)
+	    : device_index_(static_cast<int>(device_index)),
+	      difficulty_bits_(difficulty_bits),
+	      early_exit_(early_exit),
+	      batch_size_(batch_size),
+	      next_nonce_(start_nonce) {
+	    if (challenge == nullptr || challenge_len != 16) {
+	        throw std::runtime_error("HASH98 challenge must be exactly 16 bytes");
+	    }
+	    if (nonce_prefix == nullptr || nonce_prefix_len != 8) {
+	        throw std::runtime_error("HASH98 nonce prefix must be exactly 8 bytes");
+	    }
+	    if (difficulty_bits > 256u) {
+	        throw std::runtime_error("HASH98 difficulty exceeds SHA-256 digest size");
+	    }
+	    if (batch_size == 0) {
+	        throw std::runtime_error("HASH98 CUDA batch size must be greater than zero");
+	    }
+	    if (std::numeric_limits<std::uint64_t>::max() - start_nonce < batch_size) {
+	        throw std::runtime_error("HASH98 CUDA nonce range exhausted");
+	    }
+
+	    check_cuda(cudaSetDevice(device_index_), "cudaSetDevice failed");
+	    cudaDeviceProp properties{};
+	    check_cuda(cudaGetDeviceProperties(&properties, device_index_),
+	               "cudaGetDeviceProperties failed");
+	    threads_per_block_ = threads_per_block == 0 ? 512u : threads_per_block;
+	    nonces_per_thread_ = nonces_per_thread == 0 ? 4u : nonces_per_thread;
+	    if (nonces_per_thread_ != 1u
+	        && nonces_per_thread_ != 2u
+	        && nonces_per_thread_ != 4u
+	        && nonces_per_thread_ != 8u) {
+	        throw std::runtime_error("HASH98 CUDA nonces_per_thread must be one of 1, 2, 4, or 8");
+	    }
+	    const auto max_threads_per_block = std::min<std::uint32_t>(
+	        512u,
+	        static_cast<std::uint32_t>(properties.maxThreadsPerBlock));
+	    if (threads_per_block_ == 0 || threads_per_block_ > max_threads_per_block) {
+	        throw std::runtime_error("HASH98 CUDA threads_per_block is out of range");
+	    }
+	    const auto sm_count = static_cast<std::uint32_t>(std::max(properties.multiProcessorCount, 1));
+	    max_blocks_ = max_blocks == 0 ? sm_count * 8u : max_blocks;
+	    max_blocks_ = std::max<std::uint32_t>(1u, max_blocks_);
+
+	    for (std::size_t index = 0; index < challenge_words_.size(); ++index) {
+	        challenge_words_[index] = read_be32(challenge + index * 4);
+	    }
+	    for (std::size_t index = 0; index < nonce_prefix_words_.size(); ++index) {
+	        nonce_prefix_words_[index] = read_be32(nonce_prefix + index * 4);
+	    }
+
+	    check_cuda(cudaMalloc(&device_result_, sizeof(H98HashCudaDeviceResult)),
+	               "cudaMalloc HASH98 result failed");
+	}
+
+	H98HashCudaSession::~H98HashCudaSession() {
 	    if (device_result_ != nullptr) {
 	        cudaFree(device_result_);
 	        device_result_ = nullptr;
@@ -1295,6 +1513,62 @@ Rpow2CudaSession::~Rpow2CudaSession() {
 		        throw std::runtime_error("unsupported RPOW2 CUDA nonces_per_thread");
 	    }
 	}
+
+			template <unsigned int NoncesPerThread>
+			void launch_h98hash_kernel(unsigned int blocks,
+			                           unsigned int threads_per_block,
+			                           const H98HashCudaKernelParams& params,
+			                           H98HashCudaDeviceResult* result) {
+			    h98hash_mine_kernel<NoncesPerThread, true><<<blocks, threads_per_block>>>(params, result);
+			}
+
+			template <unsigned int NoncesPerThread>
+			void launch_h98hash_kernel_no_early_exit(unsigned int blocks,
+			                                         unsigned int threads_per_block,
+			                                         const H98HashCudaKernelParams& params,
+			                                         H98HashCudaDeviceResult* result) {
+			    h98hash_mine_kernel<NoncesPerThread, false><<<blocks, threads_per_block>>>(params, result);
+			}
+
+			void launch_h98hash_kernel(unsigned int blocks,
+			                           unsigned int threads_per_block,
+			                           std::uint32_t nonces_per_thread,
+			                           bool early_exit,
+			                           const H98HashCudaKernelParams& params,
+			                           H98HashCudaDeviceResult* result) {
+			    switch (nonces_per_thread) {
+			    case 1:
+			        if (early_exit) {
+			            launch_h98hash_kernel<1>(blocks, threads_per_block, params, result);
+			        } else {
+			            launch_h98hash_kernel_no_early_exit<1>(blocks, threads_per_block, params, result);
+			        }
+			        break;
+			    case 2:
+			        if (early_exit) {
+			            launch_h98hash_kernel<2>(blocks, threads_per_block, params, result);
+			        } else {
+			            launch_h98hash_kernel_no_early_exit<2>(blocks, threads_per_block, params, result);
+			        }
+			        break;
+			    case 4:
+			        if (early_exit) {
+			            launch_h98hash_kernel<4>(blocks, threads_per_block, params, result);
+			        } else {
+			            launch_h98hash_kernel_no_early_exit<4>(blocks, threads_per_block, params, result);
+			        }
+			        break;
+			    case 8:
+			        if (early_exit) {
+			            launch_h98hash_kernel<8>(blocks, threads_per_block, params, result);
+			        } else {
+			            launch_h98hash_kernel_no_early_exit<8>(blocks, threads_per_block, params, result);
+			        }
+			        break;
+			    default:
+			        throw std::runtime_error("unsupported HASH98 CUDA nonces_per_thread");
+			    }
+			}
 
 	} // namespace
 
@@ -1467,6 +1741,113 @@ Rpow2CudaSession::~Rpow2CudaSession() {
 	    return result;
 	}
 
+	namespace {
+
+	std::uint64_t h98hash_session_batch_attempts(std::uint64_t batch_size,
+	                                             std::uint64_t start_nonce,
+	                                             const H98HashCudaDeviceResult& result) {
+	    if (result.found == 0u || result.nonce_tail < start_nonce) {
+	        return batch_size;
+	    }
+	    const auto found_offset = result.nonce_tail - start_nonce;
+	    if (found_offset >= batch_size) {
+	        return batch_size;
+	    }
+	    return found_offset + 1;
+	}
+
+	} // namespace
+
+	H98HashCudaBatchResult H98HashCudaSession::mine_next_batch() {
+	    if (std::numeric_limits<std::uint64_t>::max() - next_nonce_ < batch_size_) {
+	        throw std::runtime_error("HASH98 CUDA nonce range exhausted");
+	    }
+	    const auto start_nonce = next_nonce_;
+	    check_cuda(cudaSetDevice(device_index_), "cudaSetDevice failed");
+	    check_cuda(cudaMemset(device_result_, 0, sizeof(H98HashCudaDeviceResult)),
+	               "cudaMemset HASH98 result failed");
+
+	    H98HashCudaKernelParams params{};
+	    params.difficulty_bits = difficulty_bits_;
+	    params.padding = 0;
+	    for (std::size_t index = 0; index < challenge_words_.size(); ++index) {
+	        params.challenge_words[index] = challenge_words_[index];
+	    }
+	    for (std::size_t index = 0; index < nonce_prefix_words_.size(); ++index) {
+	        params.nonce_prefix_words[index] = nonce_prefix_words_[index];
+	    }
+	    params.start_nonce = static_cast<unsigned long long>(next_nonce_);
+	    params.batch_size = static_cast<unsigned long long>(batch_size_);
+
+	    const auto work_per_block = static_cast<std::uint64_t>(threads_per_block_)
+	        * static_cast<std::uint64_t>(nonces_per_thread_);
+	    const auto needed_blocks = static_cast<std::uint64_t>(
+	        (batch_size_ + work_per_block - 1) / work_per_block);
+	    const auto launch_blocks = static_cast<unsigned int>(
+	        std::max<std::uint64_t>(1, std::min<std::uint64_t>(needed_blocks, max_blocks_)));
+	    if (launch_blocks == 0) {
+	        throw std::runtime_error("HASH98 CUDA launch grid is empty");
+	    }
+
+	    launch_h98hash_kernel(launch_blocks,
+	                          threads_per_block_,
+	                          nonces_per_thread_,
+	                          early_exit_,
+	                          params,
+	                          static_cast<H98HashCudaDeviceResult*>(device_result_));
+	    check_cuda(cudaGetLastError(), "HASH98 CUDA kernel launch failed");
+	    check_cuda(cudaDeviceSynchronize(), "HASH98 CUDA kernel execution failed");
+
+	    H98HashCudaDeviceResult host_result{};
+	    check_cuda(cudaMemcpy(&host_result,
+	                          device_result_,
+	                          sizeof(host_result),
+	                          cudaMemcpyDeviceToHost),
+	               "cudaMemcpy HASH98 result failed");
+
+	    const auto batch_attempts =
+	        h98hash_session_batch_attempts(batch_size_, start_nonce, host_result);
+	    const auto max_attempts = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+	    attempts_ = attempts_ > max_attempts - batch_attempts ? max_attempts : attempts_ + batch_attempts;
+	    next_nonce_ += batch_size_;
+
+	    H98HashCudaBatchResult result;
+	    result.found = host_result.found != 0u;
+	    result.nonce_tail = host_result.nonce_tail;
+	    result.attempts = static_cast<std::int64_t>(attempts_);
+	    if (result.found) {
+	        digest_words_to_bytes(host_result.digest_words, result.digest);
+	    }
+	    return result;
+	}
+
+	H98HashCudaBatchResult mine_h98hash_cuda_batch(std::size_t device_index,
+	                                               const std::uint8_t* challenge,
+	                                               std::size_t challenge_len,
+	                                               const std::uint8_t* nonce_prefix,
+	                                               std::size_t nonce_prefix_len,
+	                                               std::uint32_t difficulty_bits,
+	                                               std::uint64_t batch_size,
+	                                               std::uint64_t start_nonce,
+	                                               std::uint32_t threads_per_block,
+	                                               std::uint32_t nonces_per_thread,
+	                                               std::uint32_t max_blocks,
+	                                               bool early_exit) {
+	    H98HashCudaSession session(device_index,
+	                               challenge,
+	                               challenge_len,
+	                               nonce_prefix,
+	                               nonce_prefix_len,
+	                               difficulty_bits,
+	                               batch_size,
+	                               start_nonce,
+	                               threads_per_block,
+	                               nonces_per_thread,
+	                               max_blocks,
+	                               early_exit);
+	    return session.mine_next_batch();
+	}
+
 		Rpow2CudaBatchResult mine_rpow2_cuda_batch(std::size_t device_index,
 		                                           const std::uint8_t* nonce_prefix,
 		                                           std::size_t nonce_prefix_len,
@@ -1580,4 +1961,464 @@ Rpow2CudaSession::~Rpow2CudaSession() {
 	    return benchmark;
 	}
 
-	} // namespace app
+} // namespace app
+
+// ============================================================================
+// hash256.org Keccak-256 mining path.
+//
+// Input layout (from the hash256.org WGSL kernel comment):
+//   bytes  0..31  = challenge (32 bytes)
+//   bytes 32..55  = 0x00 × 24
+//   bytes 56..63  = nonce as big-endian u64 (low 64 bits of uint256 nonce)
+//   bytes 64      = 0x01 (keccak SHA3 padding domain separator)
+//   bytes 65..134 = 0x00
+//   bytes 135     = 0x80 (last bit of rate window)
+//
+// Since 24 of the 25 keccak lanes are constant for a given challenge, the
+// host pre-builds a `base_state[25]` once per session and the device kernel
+// only needs to XOR `bswap64(nonce)` into lane 7, run keccak-f1600, and
+// compare the first 32 bytes of state against a big-endian uint256 target.
+// ============================================================================
+
+namespace app {
+namespace {
+
+__device__ __constant__ std::uint64_t kKeccakRC[24] = {
+    0x0000000000000001ULL, 0x0000000000008082ULL, 0x800000000000808AULL, 0x8000000080008000ULL,
+    0x000000000000808BULL, 0x0000000080000001ULL, 0x8000000080008081ULL, 0x8000000000008009ULL,
+    0x000000000000008AULL, 0x0000000000000088ULL, 0x0000000080008009ULL, 0x000000008000000AULL,
+    0x000000008000808BULL, 0x800000000000008BULL, 0x8000000000008089ULL, 0x8000000000008003ULL,
+    0x8000000000008002ULL, 0x8000000000000080ULL, 0x000000000000800AULL, 0x800000008000000AULL,
+    0x8000000080008081ULL, 0x8000000000008080ULL, 0x0000000080000001ULL, 0x8000000080008008ULL,
+};
+
+__device__ __forceinline__ std::uint64_t h256hash_bswap64(std::uint64_t x) {
+    const unsigned int lo = static_cast<unsigned int>(x & 0xffffffffu);
+    const unsigned int hi = static_cast<unsigned int>(x >> 32);
+    const unsigned int lo_swap = __byte_perm(lo, 0u, 0x0123u);
+    const unsigned int hi_swap = __byte_perm(hi, 0u, 0x0123u);
+    return (static_cast<std::uint64_t>(lo_swap) << 32) | static_cast<std::uint64_t>(hi_swap);
+}
+
+__device__ __forceinline__ std::uint64_t h256hash_rotl64(std::uint64_t x, int n) {
+    return (x << n) | (x >> (64 - n));
+}
+
+__device__ __forceinline__ void h256hash_keccak_f1600(std::uint64_t* st) {
+    #pragma unroll 1
+    for (int round = 0; round < 24; ++round) {
+        // θ
+        const std::uint64_t c0 = st[0] ^ st[5] ^ st[10] ^ st[15] ^ st[20];
+        const std::uint64_t c1 = st[1] ^ st[6] ^ st[11] ^ st[16] ^ st[21];
+        const std::uint64_t c2 = st[2] ^ st[7] ^ st[12] ^ st[17] ^ st[22];
+        const std::uint64_t c3 = st[3] ^ st[8] ^ st[13] ^ st[18] ^ st[23];
+        const std::uint64_t c4 = st[4] ^ st[9] ^ st[14] ^ st[19] ^ st[24];
+        const std::uint64_t d0 = c4 ^ h256hash_rotl64(c1, 1);
+        const std::uint64_t d1 = c0 ^ h256hash_rotl64(c2, 1);
+        const std::uint64_t d2 = c1 ^ h256hash_rotl64(c3, 1);
+        const std::uint64_t d3 = c2 ^ h256hash_rotl64(c4, 1);
+        const std::uint64_t d4 = c3 ^ h256hash_rotl64(c0, 1);
+        st[0] ^= d0; st[5] ^= d0; st[10] ^= d0; st[15] ^= d0; st[20] ^= d0;
+        st[1] ^= d1; st[6] ^= d1; st[11] ^= d1; st[16] ^= d1; st[21] ^= d1;
+        st[2] ^= d2; st[7] ^= d2; st[12] ^= d2; st[17] ^= d2; st[22] ^= d2;
+        st[3] ^= d3; st[8] ^= d3; st[13] ^= d3; st[18] ^= d3; st[23] ^= d3;
+        st[4] ^= d4; st[9] ^= d4; st[14] ^= d4; st[19] ^= d4; st[24] ^= d4;
+
+        // ρ + π
+        const std::uint64_t b00 = st[0];
+        const std::uint64_t b10 = h256hash_rotl64(st[ 1],  1);
+        const std::uint64_t b20 = h256hash_rotl64(st[ 2], 62);
+        const std::uint64_t b05 = h256hash_rotl64(st[ 3], 28);
+        const std::uint64_t b15 = h256hash_rotl64(st[ 4], 27);
+        const std::uint64_t b16 = h256hash_rotl64(st[ 5], 36);
+        const std::uint64_t b01 = h256hash_rotl64(st[ 6], 44);
+        const std::uint64_t b11 = h256hash_rotl64(st[ 7],  6);
+        const std::uint64_t b21 = h256hash_rotl64(st[ 8], 55);
+        const std::uint64_t b06 = h256hash_rotl64(st[ 9], 20);
+        const std::uint64_t b07 = h256hash_rotl64(st[10],  3);
+        const std::uint64_t b17 = h256hash_rotl64(st[11], 10);
+        const std::uint64_t b02 = h256hash_rotl64(st[12], 43);
+        const std::uint64_t b12 = h256hash_rotl64(st[13], 25);
+        const std::uint64_t b22 = h256hash_rotl64(st[14], 39);
+        const std::uint64_t b23 = h256hash_rotl64(st[15], 41);
+        const std::uint64_t b08 = h256hash_rotl64(st[16], 45);
+        const std::uint64_t b18 = h256hash_rotl64(st[17], 15);
+        const std::uint64_t b03 = h256hash_rotl64(st[18], 21);
+        const std::uint64_t b13 = h256hash_rotl64(st[19],  8);
+        const std::uint64_t b14 = h256hash_rotl64(st[20], 18);
+        const std::uint64_t b24 = h256hash_rotl64(st[21],  2);
+        const std::uint64_t b09 = h256hash_rotl64(st[22], 61);
+        const std::uint64_t b19 = h256hash_rotl64(st[23], 56);
+        const std::uint64_t b04 = h256hash_rotl64(st[24], 14);
+
+        // χ
+        st[ 0] = b00 ^ ((~b01) & b02);
+        st[ 1] = b01 ^ ((~b02) & b03);
+        st[ 2] = b02 ^ ((~b03) & b04);
+        st[ 3] = b03 ^ ((~b04) & b00);
+        st[ 4] = b04 ^ ((~b00) & b01);
+        st[ 5] = b05 ^ ((~b06) & b07);
+        st[ 6] = b06 ^ ((~b07) & b08);
+        st[ 7] = b07 ^ ((~b08) & b09);
+        st[ 8] = b08 ^ ((~b09) & b05);
+        st[ 9] = b09 ^ ((~b05) & b06);
+        st[10] = b10 ^ ((~b11) & b12);
+        st[11] = b11 ^ ((~b12) & b13);
+        st[12] = b12 ^ ((~b13) & b14);
+        st[13] = b13 ^ ((~b14) & b10);
+        st[14] = b14 ^ ((~b10) & b11);
+        st[15] = b15 ^ ((~b16) & b17);
+        st[16] = b16 ^ ((~b17) & b18);
+        st[17] = b17 ^ ((~b18) & b19);
+        st[18] = b18 ^ ((~b19) & b15);
+        st[19] = b19 ^ ((~b15) & b16);
+        st[20] = b20 ^ ((~b21) & b22);
+        st[21] = b21 ^ ((~b22) & b23);
+        st[22] = b22 ^ ((~b23) & b24);
+        st[23] = b23 ^ ((~b24) & b20);
+        st[24] = b24 ^ ((~b20) & b21);
+
+        // ι
+        st[0] ^= kKeccakRC[round];
+    }
+}
+
+struct H256HashCudaKernelParams {
+    std::uint64_t base_state[25];
+    std::uint32_t target_words_be[8];
+    unsigned long long start_nonce;
+    unsigned long long batch_size;
+};
+
+struct H256HashCudaDeviceResult {
+    unsigned int found;
+    unsigned int padding;
+    unsigned long long nonce;
+    std::uint32_t digest_words[8];
+};
+
+template <unsigned int NoncesPerThread, bool EarlyExit>
+__global__ __launch_bounds__(128, 16)
+void h256hash_mine_kernel(H256HashCudaKernelParams params,
+                          H256HashCudaDeviceResult* result) {
+    const unsigned long long thread_id = static_cast<unsigned long long>(blockIdx.x)
+        * static_cast<unsigned long long>(blockDim.x)
+        + static_cast<unsigned long long>(threadIdx.x);
+    const unsigned long long thread_stride = static_cast<unsigned long long>(gridDim.x)
+        * static_cast<unsigned long long>(blockDim.x);
+    const unsigned long long group_stride = thread_stride * NoncesPerThread;
+    const volatile unsigned int* found_flag =
+        reinterpret_cast<const volatile unsigned int*>(&result->found);
+
+    for (unsigned long long group_offset = thread_id * NoncesPerThread;
+         group_offset < params.batch_size;
+         group_offset += group_stride) {
+        if (EarlyExit && *found_flag != 0u) {
+            return;
+        }
+        #pragma unroll
+        for (unsigned int item = 0; item < NoncesPerThread; ++item) {
+            const unsigned long long offset = group_offset + item;
+            if (offset >= params.batch_size) {
+                return;
+            }
+            const unsigned long long nonce = params.start_nonce + offset;
+
+            std::uint64_t st[25];
+            #pragma unroll
+            for (int j = 0; j < 25; ++j) {
+                st[j] = params.base_state[j];
+            }
+            // Lane 7 holds the nonce (BE-encoded bytes 56..63 of input
+            // interpreted as a LE-loaded keccak lane = bswap64 of nonce).
+            st[7] ^= h256hash_bswap64(nonce);
+            h256hash_keccak_f1600(st);
+
+            // Convert keccak lanes 0..3 (LE-encoded 32 bytes of digest) into 8
+            // big-endian u32 words so we can do uint256 less-than directly.
+            const std::uint32_t h0 = __byte_perm(static_cast<unsigned int>(st[0]),         0u, 0x0123u);
+            const std::uint32_t h1 = __byte_perm(static_cast<unsigned int>(st[0] >> 32),   0u, 0x0123u);
+            const std::uint32_t h2 = __byte_perm(static_cast<unsigned int>(st[1]),         0u, 0x0123u);
+            const std::uint32_t h3 = __byte_perm(static_cast<unsigned int>(st[1] >> 32),   0u, 0x0123u);
+            const std::uint32_t h4 = __byte_perm(static_cast<unsigned int>(st[2]),         0u, 0x0123u);
+            const std::uint32_t h5 = __byte_perm(static_cast<unsigned int>(st[2] >> 32),   0u, 0x0123u);
+            const std::uint32_t h6 = __byte_perm(static_cast<unsigned int>(st[3]),         0u, 0x0123u);
+            const std::uint32_t h7 = __byte_perm(static_cast<unsigned int>(st[3] >> 32),   0u, 0x0123u);
+
+            const std::uint32_t hs[8] = {h0, h1, h2, h3, h4, h5, h6, h7};
+            bool below = false;
+            #pragma unroll
+            for (int k = 0; k < 8; ++k) {
+                const std::uint32_t hk = hs[k];
+                const std::uint32_t dk = params.target_words_be[k];
+                if (hk < dk) { below = true; break; }
+                if (hk > dk) { below = false; break; }
+            }
+            if (below) {
+                if (atomicCAS(&result->found, 0u, 1u) == 0u) {
+                    result->nonce = nonce;
+                    result->digest_words[0] = h0;
+                    result->digest_words[1] = h1;
+                    result->digest_words[2] = h2;
+                    result->digest_words[3] = h3;
+                    result->digest_words[4] = h4;
+                    result->digest_words[5] = h5;
+                    result->digest_words[6] = h6;
+                    result->digest_words[7] = h7;
+                }
+                return;
+            }
+        }
+    }
+}
+
+template <unsigned int NoncesPerThread>
+void launch_h256hash_kernel(unsigned int blocks,
+                            unsigned int threads_per_block,
+                            const H256HashCudaKernelParams& params,
+                            H256HashCudaDeviceResult* result) {
+    h256hash_mine_kernel<NoncesPerThread, true>
+        <<<blocks, threads_per_block>>>(params, result);
+}
+
+template <unsigned int NoncesPerThread>
+void launch_h256hash_kernel_no_early_exit(unsigned int blocks,
+                                          unsigned int threads_per_block,
+                                          const H256HashCudaKernelParams& params,
+                                          H256HashCudaDeviceResult* result) {
+    h256hash_mine_kernel<NoncesPerThread, false>
+        <<<blocks, threads_per_block>>>(params, result);
+}
+
+void launch_h256hash_kernel(unsigned int blocks,
+                            unsigned int threads_per_block,
+                            std::uint32_t nonces_per_thread,
+                            bool early_exit,
+                            const H256HashCudaKernelParams& params,
+                            H256HashCudaDeviceResult* result) {
+    switch (nonces_per_thread) {
+    case 1:
+        if (early_exit) {
+            launch_h256hash_kernel<1>(blocks, threads_per_block, params, result);
+        } else {
+            launch_h256hash_kernel_no_early_exit<1>(blocks, threads_per_block, params, result);
+        }
+        break;
+    case 2:
+        if (early_exit) {
+            launch_h256hash_kernel<2>(blocks, threads_per_block, params, result);
+        } else {
+            launch_h256hash_kernel_no_early_exit<2>(blocks, threads_per_block, params, result);
+        }
+        break;
+    case 4:
+        if (early_exit) {
+            launch_h256hash_kernel<4>(blocks, threads_per_block, params, result);
+        } else {
+            launch_h256hash_kernel_no_early_exit<4>(blocks, threads_per_block, params, result);
+        }
+        break;
+    case 8:
+        if (early_exit) {
+            launch_h256hash_kernel<8>(blocks, threads_per_block, params, result);
+        } else {
+            launch_h256hash_kernel_no_early_exit<8>(blocks, threads_per_block, params, result);
+        }
+        break;
+    default:
+        throw std::runtime_error(
+            "HASH256 CUDA nonces_per_thread must be one of 1, 2, 4, or 8");
+    }
+}
+
+std::uint64_t h256hash_session_batch_attempts(std::uint64_t batch_size,
+                                              std::uint64_t start_nonce,
+                                              const H256HashCudaDeviceResult& result) {
+    if (result.found == 0u || result.nonce < start_nonce) {
+        return batch_size;
+    }
+    const auto found_offset = result.nonce - start_nonce;
+    if (found_offset >= batch_size) {
+        return batch_size;
+    }
+    return found_offset + 1;
+}
+
+} // anonymous namespace
+
+H256HashCudaSession::H256HashCudaSession(std::size_t device_index,
+                                         const std::uint8_t* challenge,
+                                         std::size_t challenge_len,
+                                         const std::uint8_t* target,
+                                         std::size_t target_len,
+                                         std::uint64_t batch_size,
+                                         std::uint64_t start_nonce,
+                                         std::uint32_t threads_per_block,
+                                         std::uint32_t nonces_per_thread,
+                                         std::uint32_t max_blocks,
+                                         bool early_exit)
+    : device_index_(static_cast<int>(device_index)),
+      early_exit_(early_exit),
+      batch_size_(batch_size),
+      next_nonce_(start_nonce) {
+    if (challenge == nullptr || challenge_len != 32) {
+        throw std::runtime_error("HASH256 challenge must be exactly 32 bytes");
+    }
+    if (target == nullptr || target_len != 32) {
+        throw std::runtime_error("HASH256 target must be exactly 32 bytes");
+    }
+    if (batch_size == 0) {
+        throw std::runtime_error("HASH256 CUDA batch size must be greater than zero");
+    }
+    if (std::numeric_limits<std::uint64_t>::max() - start_nonce < batch_size) {
+        throw std::runtime_error("HASH256 CUDA nonce range exhausted");
+    }
+
+    check_cuda(cudaSetDevice(device_index_), "cudaSetDevice failed");
+    cudaDeviceProp properties{};
+    check_cuda(cudaGetDeviceProperties(&properties, device_index_),
+               "cudaGetDeviceProperties failed");
+
+    threads_per_block_ = threads_per_block == 0 ? 128u : threads_per_block;
+    nonces_per_thread_ = nonces_per_thread == 0 ? 8u : nonces_per_thread;
+    if (nonces_per_thread_ != 1u
+        && nonces_per_thread_ != 2u
+        && nonces_per_thread_ != 4u
+        && nonces_per_thread_ != 8u) {
+        throw std::runtime_error("HASH256 CUDA nonces_per_thread must be one of 1, 2, 4, or 8");
+    }
+    const auto max_tpb = static_cast<std::uint32_t>(
+        std::max(properties.maxThreadsPerBlock, 1));
+    if (threads_per_block_ == 0 || threads_per_block_ > max_tpb) {
+        throw std::runtime_error("HASH256 CUDA threads_per_block is out of range");
+    }
+    const auto sm_count = static_cast<std::uint32_t>(
+        std::max(properties.multiProcessorCount, 1));
+    // 12 blocks/SM keeps Ampere at 100% occupancy with the kernel's
+    // __launch_bounds__(128, 16) hint while leaving slack for the scheduler.
+    max_blocks_ = max_blocks == 0 ? sm_count * 12u : max_blocks;
+    max_blocks_ = std::max<std::uint32_t>(1u, max_blocks_);
+
+    // Build the pre-absorbed keccak state. Only lane 7 (the nonce slot) is
+    // overwritten per nonce inside the kernel.
+    base_state_.fill(0);
+    for (std::size_t lane = 0; lane < 4; ++lane) {
+        std::uint64_t value = 0;
+        for (std::size_t byte = 0; byte < 8; ++byte) {
+            value |= static_cast<std::uint64_t>(challenge[lane * 8 + byte])
+                     << (byte * 8);
+        }
+        base_state_[lane] = value;
+    }
+    // Lanes 4..7 are zero (lane 7 acts as the nonce slot inside the kernel).
+    base_state_[8] = 0x0000000000000001ULL;  // byte 64 = 0x01
+    base_state_[16] = 0x8000000000000000ULL; // byte 135 = 0x80
+
+    // Pack the 32-byte big-endian target as 8 BE u32 words for direct
+    // comparison against `__byte_perm`-converted digest words.
+    for (std::size_t word = 0; word < 8; ++word) {
+        target_words_be_[word] =
+            (static_cast<std::uint32_t>(target[word * 4]) << 24)
+          | (static_cast<std::uint32_t>(target[word * 4 + 1]) << 16)
+          | (static_cast<std::uint32_t>(target[word * 4 + 2]) << 8)
+          | static_cast<std::uint32_t>(target[word * 4 + 3]);
+    }
+
+    check_cuda(cudaMalloc(&device_result_, sizeof(H256HashCudaDeviceResult)),
+               "cudaMalloc HASH256 result failed");
+}
+
+H256HashCudaSession::~H256HashCudaSession() {
+    if (device_result_ != nullptr) {
+        cudaFree(device_result_);
+        device_result_ = nullptr;
+    }
+}
+
+H256HashCudaBatchResult H256HashCudaSession::mine_next_batch() {
+    if (std::numeric_limits<std::uint64_t>::max() - next_nonce_ < batch_size_) {
+        throw std::runtime_error("HASH256 CUDA nonce range exhausted");
+    }
+    const auto start_nonce = next_nonce_;
+    check_cuda(cudaSetDevice(device_index_), "cudaSetDevice failed");
+    check_cuda(cudaMemset(device_result_, 0, sizeof(H256HashCudaDeviceResult)),
+               "cudaMemset HASH256 result failed");
+
+    H256HashCudaKernelParams params{};
+    for (std::size_t i = 0; i < base_state_.size(); ++i) {
+        params.base_state[i] = base_state_[i];
+    }
+    for (std::size_t i = 0; i < target_words_be_.size(); ++i) {
+        params.target_words_be[i] = target_words_be_[i];
+    }
+    params.start_nonce = static_cast<unsigned long long>(start_nonce);
+    params.batch_size = static_cast<unsigned long long>(batch_size_);
+
+    const auto work_per_block = static_cast<std::uint64_t>(threads_per_block_)
+        * static_cast<std::uint64_t>(nonces_per_thread_);
+    const auto needed_blocks = (batch_size_ + work_per_block - 1) / work_per_block;
+    const auto launch_blocks = static_cast<unsigned int>(
+        std::max<std::uint64_t>(1, std::min<std::uint64_t>(needed_blocks, max_blocks_)));
+    if (launch_blocks == 0) {
+        throw std::runtime_error("HASH256 CUDA launch grid is empty");
+    }
+
+    launch_h256hash_kernel(launch_blocks,
+                           threads_per_block_,
+                           nonces_per_thread_,
+                           early_exit_,
+                           params,
+                           static_cast<H256HashCudaDeviceResult*>(device_result_));
+    check_cuda(cudaGetLastError(), "HASH256 CUDA kernel launch failed");
+    check_cuda(cudaDeviceSynchronize(), "HASH256 CUDA kernel execution failed");
+
+    H256HashCudaDeviceResult host_result{};
+    check_cuda(cudaMemcpy(&host_result,
+                          device_result_,
+                          sizeof(host_result),
+                          cudaMemcpyDeviceToHost),
+               "cudaMemcpy HASH256 result failed");
+
+    const auto batch_attempts =
+        h256hash_session_batch_attempts(batch_size_, start_nonce, host_result);
+    const auto max_attempts = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+    attempts_ = attempts_ > max_attempts - batch_attempts ? max_attempts
+                                                         : attempts_ + batch_attempts;
+    next_nonce_ += batch_size_;
+
+    H256HashCudaBatchResult result;
+    result.found = host_result.found != 0u;
+    result.nonce = host_result.nonce;
+    result.attempts = static_cast<std::int64_t>(attempts_);
+    if (result.found) {
+        digest_words_to_bytes(host_result.digest_words, result.digest);
+    }
+    return result;
+}
+
+H256HashCudaBatchResult mine_h256hash_cuda_batch(std::size_t device_index,
+                                                 const std::uint8_t* challenge,
+                                                 std::size_t challenge_len,
+                                                 const std::uint8_t* target,
+                                                 std::size_t target_len,
+                                                 std::uint64_t batch_size,
+                                                 std::uint64_t start_nonce,
+                                                 std::uint32_t threads_per_block,
+                                                 std::uint32_t nonces_per_thread,
+                                                 std::uint32_t max_blocks,
+                                                 bool early_exit) {
+    H256HashCudaSession session(device_index,
+                                challenge,
+                                challenge_len,
+                                target,
+                                target_len,
+                                batch_size,
+                                start_nonce,
+                                threads_per_block,
+                                nonces_per_thread,
+                                max_blocks,
+                                early_exit);
+    return session.mine_next_batch();
+}
+
+} // namespace app

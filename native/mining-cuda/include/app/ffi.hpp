@@ -29,6 +29,8 @@ struct mining_cuda_job {
 
 struct mining_cuda_session;
 struct mining_cuda_rpow2_session;
+struct mining_cuda_h98hash_session;
+struct mining_cuda_h256hash_session;
 
 struct mining_cuda_rpow2_solver_config {
     std::uint64_t batch_size;
@@ -59,6 +61,35 @@ struct mining_cuda_rpow2_benchmark_result {
     double empty_launch_us;
     double kernel_hashrate;
     double effective_hashrate;
+};
+
+struct mining_cuda_h98hash_job {
+    const std::uint8_t* challenge_ptr;
+    std::size_t challenge_len;
+    const std::uint8_t* nonce_prefix_ptr;
+    std::size_t nonce_prefix_len;
+    std::uint32_t difficulty_bits;
+};
+
+struct mining_cuda_h98hash_mine_result {
+    bool found;
+    std::uint64_t nonce_tail;
+    std::int64_t attempts;
+    char digest_hex[65];
+};
+
+struct mining_cuda_h256hash_job {
+    const std::uint8_t* challenge_ptr;
+    std::size_t challenge_len;
+    const std::uint8_t* target_ptr;
+    std::size_t target_len;
+};
+
+struct mining_cuda_h256hash_mine_result {
+    bool found;
+    std::uint64_t nonce;
+    std::int64_t attempts;
+    char digest_hex[65];
 };
 
 struct mining_cuda_benchmark_result {
@@ -138,6 +169,36 @@ MINING_CUDA_EXPORT bool mining_cuda_rpow2_benchmark(
     const mining_cuda_rpow2_solver_config* config,
     std::uint32_t duration_ms,
     mining_cuda_rpow2_benchmark_result* result);
+MINING_CUDA_EXPORT bool mining_cuda_h98hash_mine_batch(
+    std::size_t device_index,
+    const mining_cuda_h98hash_job* job,
+    const mining_cuda_rpow2_solver_config* config,
+    std::uint64_t start_nonce,
+    mining_cuda_h98hash_mine_result* result);
+MINING_CUDA_EXPORT mining_cuda_h98hash_session* mining_cuda_h98hash_session_create(
+    std::size_t device_index,
+    const mining_cuda_h98hash_job* job,
+    const mining_cuda_rpow2_solver_config* config,
+    std::uint64_t start_nonce);
+MINING_CUDA_EXPORT bool mining_cuda_h98hash_session_mine_next_batch(
+    mining_cuda_h98hash_session* session,
+    mining_cuda_h98hash_mine_result* result);
+MINING_CUDA_EXPORT void mining_cuda_h98hash_session_destroy(mining_cuda_h98hash_session* session);
+MINING_CUDA_EXPORT bool mining_cuda_h256hash_mine_batch(
+    std::size_t device_index,
+    const mining_cuda_h256hash_job* job,
+    const mining_cuda_rpow2_solver_config* config,
+    std::uint64_t start_nonce,
+    mining_cuda_h256hash_mine_result* result);
+MINING_CUDA_EXPORT mining_cuda_h256hash_session* mining_cuda_h256hash_session_create(
+    std::size_t device_index,
+    const mining_cuda_h256hash_job* job,
+    const mining_cuda_rpow2_solver_config* config,
+    std::uint64_t start_nonce);
+MINING_CUDA_EXPORT bool mining_cuda_h256hash_session_mine_next_batch(
+    mining_cuda_h256hash_session* session,
+    mining_cuda_h256hash_mine_result* result);
+MINING_CUDA_EXPORT void mining_cuda_h256hash_session_destroy(mining_cuda_h256hash_session* session);
 MINING_CUDA_EXPORT bool mining_argon2id_hash_raw(
     const std::uint8_t* password_ptr,
     std::size_t password_len,

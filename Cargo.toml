@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 mining = { path = "crates/mining" }
+ethers-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 url.workspace = true
@@ -14,6 +15,7 @@ crossterm.workspace = true
 rand.workspace = true
 time.workspace = true
 unicode-width.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -56,6 +58,11 @@ hmac = "0.12"
 sha2 = "0.10"
 time = { version = "0.3", default-features = false, features = ["std", "local-offset"] }
 unicode-width = "0.2"
+tokio = { version = "1.48", features = ["macros", "rt-multi-thread"] }
+ethers-core = "2.0"
+ethers-middleware = { version = "2.0", default-features = false }
+ethers-providers = { version = "2.0", default-features = false, features = ["rustls"] }
+ethers-signers = { version = "2.0", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

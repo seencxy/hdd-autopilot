@@ -72,6 +72,21 @@ struct Rpow2CudaBenchmarkResult {
     double effective_hashrate = 0.0;
 };
 
+struct H98HashCudaBatchResult {
+    bool found = false;
+    std::uint64_t nonce_tail = 0;
+    std::int64_t attempts = 0;
+    std::array<std::uint8_t, 32> digest{};
+};
+
+struct H256HashCudaBatchResult {
+    bool found = false;
+    /// Low 64 bits of the uint256 nonce; high 24 bytes are always zero.
+    std::uint64_t nonce = 0;
+    std::int64_t attempts = 0;
+    std::array<std::uint8_t, 32> digest{};
+};
+
 class Rpow2CudaSession {
 public:
     Rpow2CudaSession(
@@ -104,6 +119,88 @@ private:
     std::uint32_t nonce_offset_ = 0;
     std::uint32_t difficulty_bits_ = 0;
     std::uint32_t block_count_ = 0;
+    std::uint32_t threads_per_block_ = 0;
+    std::uint32_t nonces_per_thread_ = 0;
+    std::uint32_t max_blocks_ = 0;
+    bool early_exit_ = true;
+    std::uint64_t batch_size_ = 0;
+    std::uint64_t next_nonce_ = 0;
+    std::uint64_t attempts_ = 0;
+};
+
+class H98HashCudaSession {
+public:
+    H98HashCudaSession(
+        std::size_t device_index,
+        const std::uint8_t* challenge,
+        std::size_t challenge_len,
+        const std::uint8_t* nonce_prefix,
+        std::size_t nonce_prefix_len,
+        std::uint32_t difficulty_bits,
+        std::uint64_t batch_size,
+        std::uint64_t start_nonce,
+        std::uint32_t threads_per_block,
+        std::uint32_t nonces_per_thread,
+        std::uint32_t max_blocks,
+        bool early_exit);
+    ~H98HashCudaSession();
+
+    H98HashCudaSession(const H98HashCudaSession&) = delete;
+    H98HashCudaSession& operator=(const H98HashCudaSession&) = delete;
+    H98HashCudaSession(H98HashCudaSession&&) = delete;
+    H98HashCudaSession& operator=(H98HashCudaSession&&) = delete;
+
+    H98HashCudaBatchResult mine_next_batch();
+
+private:
+    int device_index_ = 0;
+    void* device_result_ = nullptr;
+    std::array<std::uint32_t, 4> challenge_words_{};
+    std::array<std::uint32_t, 2> nonce_prefix_words_{};
+    std::uint32_t difficulty_bits_ = 0;
+    std::uint32_t threads_per_block_ = 0;
+    std::uint32_t nonces_per_thread_ = 0;
+    std::uint32_t max_blocks_ = 0;
+    bool early_exit_ = true;
+    std::uint64_t batch_size_ = 0;
+    std::uint64_t next_nonce_ = 0;
+    std::uint64_t attempts_ = 0;
+};
+
+class H256HashCudaSession {
+public:
+    H256HashCudaSession(
+        std::size_t device_index,
+        const std::uint8_t* challenge,
+        std::size_t challenge_len,
+        const std::uint8_t* target,
+        std::size_t target_len,
+        std::uint64_t batch_size,
+        std::uint64_t start_nonce,
+        std::uint32_t threads_per_block,
+        std::uint32_t nonces_per_thread,
+        std::uint32_t max_blocks,
+        bool early_exit);
+    ~H256HashCudaSession();
+
+    H256HashCudaSession(const H256HashCudaSession&) = delete;
+    H256HashCudaSession& operator=(const H256HashCudaSession&) = delete;
+    H256HashCudaSession(H256HashCudaSession&&) = delete;
+    H256HashCudaSession& operator=(H256HashCudaSession&&) = delete;
+
+    H256HashCudaBatchResult mine_next_batch();
+
+private:
+    int device_index_ = 0;
+    void* device_result_ = nullptr;
+    /// 25 keccak lanes after pre-absorbing the constant 64-byte input
+    /// frame `challenge ‖ 24 zeros ‖ 0 (placeholder for nonce)` plus the
+    /// constant keccak padding bits at byte 64 (0x01) and byte 135 (0x80).
+    /// Lane 7 (bytes 56..63) is overwritten by the nonce inside the kernel;
+    /// all other lanes stay constant for the lifetime of the session.
+    std::array<std::uint64_t, 25> base_state_{};
+    /// Difficulty target as 8 big-endian uint32 words (most-significant first).
+    std::array<std::uint32_t, 8> target_words_be_{};
     std::uint32_t threads_per_block_ = 0;
     std::uint32_t nonces_per_thread_ = 0;
     std::uint32_t max_blocks_ = 0;
@@ -174,6 +271,33 @@ Rpow2CudaBenchmarkResult benchmark_rpow2_cuda(
     std::uint32_t difficulty_bits,
     std::uint64_t batch_size,
     std::uint32_t duration_ms,
+    std::uint32_t threads_per_block,
+    std::uint32_t nonces_per_thread,
+    std::uint32_t max_blocks,
+    bool early_exit);
+
+H98HashCudaBatchResult mine_h98hash_cuda_batch(
+    std::size_t device_index,
+    const std::uint8_t* challenge,
+    std::size_t challenge_len,
+    const std::uint8_t* nonce_prefix,
+    std::size_t nonce_prefix_len,
+    std::uint32_t difficulty_bits,
+    std::uint64_t batch_size,
+    std::uint64_t start_nonce,
+    std::uint32_t threads_per_block,
+    std::uint32_t nonces_per_thread,
+    std::uint32_t max_blocks,
+    bool early_exit);
+
+H256HashCudaBatchResult mine_h256hash_cuda_batch(
+    std::size_t device_index,
+    const std::uint8_t* challenge,
+    std::size_t challenge_len,
+    const std::uint8_t* target,
+    std::size_t target_len,
+    std::uint64_t batch_size,
+    std::uint64_t start_nonce,
     std::uint32_t threads_per_block,
     std::uint32_t nonces_per_thread,
     std::uint32_t max_blocks,
