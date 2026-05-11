@@ -36,8 +36,10 @@ pub const H256HASH_DEFAULT_CUDA_BATCH_SIZE: u64 = 1 << 30;
 /// 128 threads/block × 16 blocks/SM = 100% Ampere occupancy.
 pub const H256HASH_DEFAULT_CUDA_THREADS_PER_BLOCK: u32 = 128;
 
-/// Process 8 nonces per thread. Template specializes on {1, 2, 4, 8}.
-pub const H256HASH_DEFAULT_CUDA_NONCES_PER_THREAD: u32 = 2;
+/// 1 nonce per thread: with launch_bounds(128,4) giving 128 regs/thread budget,
+/// keccak peaks at ~110 regs (state 50 + rho-pi temps 50 + theta 10). Adding a
+/// second nonce would double state registers and exceed the budget causing spills.
+pub const H256HASH_DEFAULT_CUDA_NONCES_PER_THREAD: u32 = 1;
 
 /// 0 = auto-detect (host queries SM count and uses SM × 12 blocks).
 pub const H256HASH_DEFAULT_CUDA_MAX_BLOCKS: u32 = 0;
@@ -378,9 +380,7 @@ fn mine_h256hash_cuda(
                 } else {
                     0.0
                 };
-                eprintln!(
-                    "hashrate: {mhs:.1} MH/s  total_attempts={total_attempts}"
-                );
+                eprintln!("hashrate: {mhs:.1} MH/s  total_attempts={total_attempts}");
                 last_report = now;
             }
             start_nonce = start_nonce.wrapping_add(batch_size);
