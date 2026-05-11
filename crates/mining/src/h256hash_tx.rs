@@ -19,7 +19,7 @@ use std::sync::Arc;
 use ethers_core::abi::{Function, Param, ParamType, StateMutability, Token};
 use ethers_core::types::transaction::eip2718::TypedTransaction;
 use ethers_core::types::{
-    Address, BlockNumber, Bytes, Eip1559TransactionRequest, TransactionReceipt, U256,
+    Address, BlockId, BlockNumber, Bytes, Eip1559TransactionRequest, TransactionReceipt, U256,
 };
 use ethers_core::utils::keccak256;
 use ethers_middleware::SignerMiddleware;
@@ -434,7 +434,8 @@ where
         .to(contract_address)
         .data(Bytes::from(data))
         .into();
-    let output = client.call(&transaction, None).await.map_err(|error| {
+    let block = Some(BlockId::Number(BlockNumber::Latest));
+    let output = client.call(&transaction, block).await.map_err(|error| {
         message(format!(
             "HASH256 {} RPC call failed: {error}",
             function.name
