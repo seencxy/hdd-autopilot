@@ -11,6 +11,9 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(mining_opencl_native_enabled)");
     println!("cargo:rerun-if-env-changed=HOST");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
+    println!("cargo:rerun-if-env-changed=CUDA_HOME");
+    println!("cargo:rerun-if-env-changed=CUDA_ROOT");
+    println!("cargo:rerun-if-env-changed=CUDAToolkit_ROOT");
     println!("cargo:rerun-if-env-changed=OPENCL_ROOT");
     println!("cargo:rerun-if-env-changed=OpenCL_ROOT");
     println!("cargo:rerun-if-env-changed=VCPKG_ROOT");
@@ -69,12 +72,12 @@ fn main() {
         warn_native_disabled("host is not Windows; skipping OpenCL native backend");
         return;
     }
-    if target_os == "windows"
+    if (target_os == "linux" || target_os == "windows")
         && !env_flag("HDD_AUTOPILOT_FORCE_OPENCL")
-        && windows_cuda_toolkit_present()
+        && cuda_toolkit_present(&target_os)
     {
         warn_native_disabled(
-            "CUDA Toolkit detected; skipping Windows OpenCL native backend to avoid duplicate native solver symbols",
+            "CUDA Toolkit detected; skipping OpenCL native backend to avoid duplicate native solver symbols",
         );
         return;
     }
@@ -162,29 +165,70 @@ fn env_flag(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn windows_cuda_toolkit_present() -> bool {
+fn cuda_toolkit_present(target_os: &str) -> bool {
     for var in ["CUDA_PATH", "CUDA_HOME", "CUDA_ROOT", "CUDAToolkit_ROOT"] {
         if let Some(root) = std::env::var_os(var)
-            && cuda_root_has_nvcc(PathBuf::from(root))
+            && cuda_root_has_nvcc(target_os, PathBuf::from(root))
         {
             return true;
         }
     }
 
-    let cuda_root = PathBuf::from(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA");
-    if !cuda_root.is_dir() {
-        return false;
+    if target_os == "windows" {
+        let cuda_root = PathBuf::from(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA");
+        if !cuda_root.is_dir() {
+            return false;
+        }
+        return std::fs::read_dir(cuda_root)
+            .ok()
+            .into_iter()
+            .flat_map(|entries| entries.filter_map(Result::ok))
+            .map(|entry| entry.path())
+            .any(|path| cuda_root_has_nvcc(target_os, path));
     }
-    std::fs::read_dir(cuda_root)
-        .ok()
-        .into_iter()
-        .flat_map(|entries| entries.filter_map(Result::ok))
-        .map(|entry| entry.path())
-        .any(cuda_root_has_nvcc)
+
+    if target_os == "linux" {
+        if cuda_root_has_nvcc(target_os, PathBuf::from("/usr/local/cuda")) {
+            return true;
+        }
+        if let Ok(entries) = std::fs::read_dir("/usr/local") {
+            if entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.is_dir()
+                        && path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| name.starts_with("cuda-"))
+                })
+                .any(|path| cuda_root_has_nvcc(target_os, path))
+            {
+                return true;
+            }
+        }
+        return find_program_in_path("nvcc");
+    }
+
+    false
 }
 
-fn cuda_root_has_nvcc(root: PathBuf) -> bool {
-    root.join("bin").join("nvcc.exe").is_file()
+fn cuda_root_has_nvcc(target_os: &str, root: PathBuf) -> bool {
+    let nvcc = if target_os == "windows" {
+        "nvcc.exe"
+    } else {
+        "nvcc"
+    };
+    root.join("bin").join(nvcc).is_file()
+}
+
+fn find_program_in_path(name: &str) -> bool {
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path_var)
+        .map(|dir| dir.join(name))
+        .any(|path| path.is_file())
 }
 
 fn prepare_windows_build_environment() {
