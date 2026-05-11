@@ -2097,8 +2097,12 @@ struct H256HashCudaDeviceResult {
     std::uint32_t digest_words[8];
 };
 
+// No min-blocks hint: let nvcc allocate as many registers as keccak needs
+// (~100 per thread) without spilling to local memory. Occupancy is ~5-6
+// blocks/SM on sm_86, but no spilling gives 3-4x more throughput than the
+// forced-32-register version with __launch_bounds__(128, 16).
 template <unsigned int NoncesPerThread, bool EarlyExit>
-__global__ __launch_bounds__(128, 16)
+__global__ __launch_bounds__(128)
 void h256hash_mine_kernel(H256HashCudaKernelParams params,
                           H256HashCudaDeviceResult* result) {
     const unsigned long long thread_id = static_cast<unsigned long long>(blockIdx.x)
@@ -2116,7 +2120,9 @@ void h256hash_mine_kernel(H256HashCudaKernelParams params,
         if (EarlyExit && *found_flag != 0u) {
             return;
         }
-        #pragma unroll
+        // No unroll: unrolling NoncesPerThread copies of the keccak state
+        // doubles/quadruples live registers and causes severe spilling.
+        #pragma unroll 1
         for (unsigned int item = 0; item < NoncesPerThread; ++item) {
             const unsigned long long offset = group_offset + item;
             if (offset >= params.batch_size) {
