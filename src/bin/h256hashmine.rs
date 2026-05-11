@@ -23,7 +23,8 @@ use mining::h256hash::{
 use mining::h256hash_tx::{
     DEFAULT_HASH256_CHAIN_ID, DEFAULT_HASH256_CONTRACT_ADDRESS, DEFAULT_HASH256_GAS_LIMIT,
     DEFAULT_HASH256_MAX_FEE_HEADROOM_WEI, DEFAULT_HASH256_PRIORITY_TIP_WEI, H256HashMintOutcome,
-    H256HashMintRequest, parse_h256hash_u256, read_h256hash_status, submit_h256hash_mine,
+    H256HashMintRequest, parse_h256hash_u256, read_h256hash_mining_round, read_h256hash_status,
+    submit_h256hash_mine,
 };
 use rand as _;
 use reqwest as _;
@@ -89,20 +90,47 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     let block_watch_interval = Duration::from_secs(args.block_watch_secs.max(1));
     let mut total_submits = 0u64;
+    let mut first_round = true;
 
     loop {
         // 1. Refresh challenge + difficulty for this attempt.
-        let status =
-            match read_h256hash_status(&rpc_url, &contract_address, &wallet_address).await {
-                Ok(status) => status,
+        //    First round: full status (5 eth_calls) for display.
+        //    Subsequent rounds: lightweight poll (2 eth_calls) to avoid rate limits.
+        let (challenge, difficulty) = if first_round {
+            first_round = false;
+            let status =
+                match read_h256hash_status(&rpc_url, &contract_address, &wallet_address).await {
+                    Ok(status) => status,
+                    Err(error) => {
+                        eprintln!("warn: failed to read mining state: {error}; retrying in 12s");
+                        tokio::time::sleep(Duration::from_secs(12)).await;
+                        first_round = true;
+                        continue;
+                    }
+                };
+            let mut target = [0u8; 32];
+            status.mining_state.difficulty.to_big_endian(&mut target);
+            println!(
+                "epoch={} epoch_blocks_left={} reward={} difficulty=0x{} challenge=0x{} balance={}",
+                status.mining_state.epoch,
+                status.mining_state.epoch_blocks_left,
+                status.mining_state.reward,
+                hex_lower(&target),
+                hex_lower(&status.challenge),
+                status.balance
+            );
+            (status.challenge, status.mining_state.difficulty)
+        } else {
+            match read_h256hash_mining_round(&rpc_url, &contract_address, &wallet_address).await {
+                Ok(pair) => pair,
                 Err(error) => {
                     eprintln!("warn: failed to read mining state: {error}; retrying in 12s");
                     tokio::time::sleep(Duration::from_secs(12)).await;
                     continue;
                 }
-            };
-        let challenge = status.challenge;
-        let difficulty = status.mining_state.difficulty;
+            }
+        };
+
         if difficulty.is_zero() {
             eprintln!("warn: on-chain difficulty is zero; sleeping 12s");
             tokio::time::sleep(Duration::from_secs(12)).await;
@@ -110,15 +138,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
         }
         let mut target = [0u8; 32];
         difficulty.to_big_endian(&mut target);
-
         println!(
-            "epoch={} epoch_blocks_left={} reward={} difficulty=0x{} challenge=0x{} balance={}",
-            status.mining_state.epoch,
-            status.mining_state.epoch_blocks_left,
-            status.mining_state.reward,
+            "difficulty=0x{} challenge=0x{}",
             hex_lower(&target),
-            hex_lower(&challenge),
-            status.balance
+            hex_lower(&challenge)
         );
 
         let start_nonce = args.start_nonce.unwrap_or_else(rand::random::<u64>);

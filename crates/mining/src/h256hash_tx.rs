@@ -249,12 +249,20 @@ pub async fn read_h256hash_status(
         .map_err(|error| message(format!("invalid HASH256 RPC URL: {error}")))?;
     let challenge =
         read_h256hash_challenge_with_client(&provider, contract_address, account_address).await?;
-    let balance = read_balance_with_client(&provider, contract_address, account_address).await?;
+    // balanceOf is display-only; treat failures as non-fatal so rate limits on
+    // this call do not block mining. Constants are fetched once at startup.
+    let balance = read_balance_with_client(&provider, contract_address, account_address)
+        .await
+        .unwrap_or(U256::zero());
     let mining_state = read_mining_state_with_client(&provider, contract_address).await?;
     let max_mints_per_block =
-        read_uint_constant_with_client(&provider, contract_address, "MAX_MINTS_PER_BLOCK").await?;
+        read_uint_constant_with_client(&provider, contract_address, "MAX_MINTS_PER_BLOCK")
+            .await
+            .unwrap_or(U256::from(10u64));
     let epoch_blocks =
-        read_uint_constant_with_client(&provider, contract_address, "EPOCH_BLOCKS").await?;
+        read_uint_constant_with_client(&provider, contract_address, "EPOCH_BLOCKS")
+            .await
+            .unwrap_or(U256::from(100u64));
     Ok(H256HashChainStatus {
         account_address: format_address(account_address),
         contract_address: format_address(contract_address),
@@ -264,6 +272,24 @@ pub async fn read_h256hash_status(
         max_mints_per_block,
         epoch_blocks,
     })
+}
+
+/// Lightweight poll used in the mining loop inner iterations: only fetches the
+/// two values that can change between rounds (challenge and difficulty).
+/// Reduces eth_call traffic from 5 to 2 per polling cycle.
+pub async fn read_h256hash_mining_round(
+    rpc_url: &str,
+    contract_address: &str,
+    account_address: &str,
+) -> Result<([u8; 32], U256), MiningError> {
+    let contract_address = parse_address(contract_address)?;
+    let account_address = parse_address(account_address)?;
+    let provider = Provider::<Http>::try_from(rpc_url)
+        .map_err(|error| message(format!("invalid HASH256 RPC URL: {error}")))?;
+    let challenge =
+        read_h256hash_challenge_with_client(&provider, contract_address, account_address).await?;
+    let mining_state = read_mining_state_with_client(&provider, contract_address).await?;
+    Ok((challenge, mining_state.difficulty))
 }
 
 pub fn h256hash_mine_calldata(nonce: u64) -> Result<Vec<u8>, MiningError> {
