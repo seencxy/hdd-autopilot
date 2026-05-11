@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::mpsc;
 use std::thread;
+use std::time::Instant;
 
 use ethers_core::utils::keccak256;
 
@@ -322,6 +323,15 @@ fn mine_h256hash_cuda(
             start_nonce,
         )
         .map_err(MiningError::Message)?;
+        eprintln!(
+            "mining: backend=Cuda device={} batch={} threads_per_block={} nonces_per_thread={}",
+            config.cuda_device_index,
+            batch_size,
+            config.cuda_threads_per_block,
+            config.cuda_nonces_per_thread,
+        );
+        let session_start = Instant::now();
+        let mut last_report = session_start;
         while remaining >= batch_size {
             if cancel.load(Ordering::SeqCst) {
                 return Err(crate::error::interrupted_error());
@@ -331,6 +341,20 @@ fn mine_h256hash_cuda(
             let total_attempts = attempts_before_session.saturating_add(session_attempts);
             if let Some(result) = verified_cuda_result(job, result, total_attempts)? {
                 return Ok(Some(result));
+            }
+            // Print hashrate every ~10 seconds.
+            let now = Instant::now();
+            if now.duration_since(last_report).as_secs() >= 10 {
+                let elapsed = now.duration_since(session_start).as_secs_f64();
+                let mhs = if elapsed > 0.0 {
+                    session_attempts as f64 / elapsed / 1_000_000.0
+                } else {
+                    0.0
+                };
+                eprintln!(
+                    "hashrate: {mhs:.1} MH/s  total_attempts={total_attempts}"
+                );
+                last_report = now;
             }
             start_nonce = start_nonce.wrapping_add(batch_size);
             remaining = remaining.saturating_sub(batch_size);
