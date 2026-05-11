@@ -37,7 +37,7 @@ pub const H256HASH_DEFAULT_CUDA_BATCH_SIZE: u64 = 1 << 30;
 pub const H256HASH_DEFAULT_CUDA_THREADS_PER_BLOCK: u32 = 128;
 
 /// Process 8 nonces per thread. Template specializes on {1, 2, 4, 8}.
-pub const H256HASH_DEFAULT_CUDA_NONCES_PER_THREAD: u32 = 1;
+pub const H256HASH_DEFAULT_CUDA_NONCES_PER_THREAD: u32 = 2;
 
 /// 0 = auto-detect (host queries SM count and uses SM × 12 blocks).
 pub const H256HASH_DEFAULT_CUDA_MAX_BLOCKS: u32 = 0;

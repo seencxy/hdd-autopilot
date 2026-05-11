@@ -2005,7 +2005,10 @@ __device__ __forceinline__ std::uint64_t h256hash_rotl64(std::uint64_t x, int n)
 }
 
 __device__ __forceinline__ void h256hash_keccak_f1600(std::uint64_t* st) {
-    #pragma unroll 1
+    // Full unroll: all indices into st[] become compile-time constants, so
+    // the compiler can keep the 25-word state in registers instead of local
+    // memory. #pragma unroll 1 was forcing dynamic indexing → DRAM spills.
+    #pragma unroll
     for (int round = 0; round < 24; ++round) {
         // θ
         const std::uint64_t c0 = st[0] ^ st[5] ^ st[10] ^ st[15] ^ st[20];
@@ -2120,9 +2123,7 @@ void h256hash_mine_kernel(H256HashCudaKernelParams params,
         if (EarlyExit && *found_flag != 0u) {
             return;
         }
-        // No unroll: unrolling NoncesPerThread copies of the keccak state
-        // doubles/quadruples live registers and causes severe spilling.
-        #pragma unroll 1
+        #pragma unroll
         for (unsigned int item = 0; item < NoncesPerThread; ++item) {
             const unsigned long long offset = group_offset + item;
             if (offset >= params.batch_size) {
