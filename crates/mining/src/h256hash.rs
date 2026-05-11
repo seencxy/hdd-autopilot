@@ -159,6 +159,22 @@ pub fn h256hash_meets_difficulty(digest: &[u8; 32], target: &[u8; 32]) -> bool {
     false
 }
 
+/// Returns a short human-readable CUDA status for startup diagnostics.
+/// Ok(summary) means GPU is available; Err(reason) means it is not.
+pub fn cuda_availability_summary() -> Result<String, String> {
+    if !mining_cuda_sys::is_supported_target() {
+        return Err("this binary was compiled for a platform without CUDA support".to_string());
+    }
+    match mining_cuda_sys::is_available() {
+        Ok(true) => Ok("available".to_string()),
+        Ok(false) => Err("CUDA device not found or driver error".to_string()),
+        Err(error) => Err(format!(
+            "CUDA native backend not compiled into this binary ({error}); \
+             ensure nvcc is in PATH when building"
+        )),
+    }
+}
+
 pub fn mine_h256hash(
     job: &H256HashJob,
     config: H256HashMineConfig,
@@ -290,11 +306,22 @@ fn mine_h256hash_cuda(
     config: H256HashMineConfig,
     cancel: &Arc<AtomicBool>,
 ) -> Result<Option<H256HashMineResult>, MiningError> {
-    if !mining_cuda_sys::is_available()
-        .map_err(MiningError::Message)
-        .unwrap_or(false)
-    {
-        return Ok(None);
+    match mining_cuda_sys::is_available() {
+        Ok(true) => {}
+        Ok(false) => {
+            eprintln!(
+                "warn: CUDA is not available on this device (driver/device error); falling back to CPU"
+            );
+            return Ok(None);
+        }
+        Err(error) => {
+            eprintln!("warn: CUDA backend unavailable: {error}");
+            eprintln!(
+                "warn: This binary was likely compiled without nvcc. \
+                 Rebuild on a machine with CUDA Toolkit installed and nvcc in PATH."
+            );
+            return Ok(None);
+        }
     }
 
     let batch_size = config.cuda_batch_size.max(1);

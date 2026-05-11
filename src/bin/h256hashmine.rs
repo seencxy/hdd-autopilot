@@ -88,6 +88,23 @@ async fn run() -> Result<(), Box<dyn Error>> {
         args.once
     );
 
+    // Early CUDA diagnostics so the user knows immediately whether the GPU will be used.
+    if !args.cpu_only {
+        match mining::h256hash::cuda_availability_summary() {
+            Ok(summary) => println!("cuda: {summary}"),
+            Err(reason) => {
+                eprintln!("WARN: GPU mining disabled — {reason}");
+                eprintln!(
+                    "WARN: Rebuild on a machine with CUDA Toolkit + nvcc in PATH to enable GPU mining."
+                );
+                if !args.allow_cpu_fallback {
+                    return Err("CUDA is required but not available (use --cpu to force CPU mode)".into());
+                }
+                eprintln!("WARN: Falling back to CPU mining (add --no-cpu-fallback to abort instead).");
+            }
+        }
+    }
+
     let block_watch_interval = Duration::from_secs(args.block_watch_secs.max(1));
     let mut total_submits = 0u64;
     let mut first_round = true;
