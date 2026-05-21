@@ -31,6 +31,7 @@ pub const DEFAULT_POG_RPC_URL: &str = "https://eth-mainnet.g.alchemy.com/v2/ZB5t
 pub const DEFAULT_POG_EPOCH_LENGTH: u64 = 100;
 pub const DEFAULT_POG_GAS_LIMIT: u64 = 300_000;
 pub const DEFAULT_POG_PRIORITY_TIP_WEI: u64 = 1_000_000_000;
+pub const DEFAULT_POG_LOW_PRIORITY_TIP_FLOOR_WEI: u64 = 100_000_000;
 pub const DEFAULT_POG_MAX_FEE_HEADROOM_WEI: u64 = 5_000_000_000;
 
 #[derive(Clone)]
@@ -41,12 +42,19 @@ pub struct PogMintRequest {
     pub chain_id: u64,
     pub nonce: u64,
     pub gas_limit: Option<u64>,
-    pub priority_tip_wei: U256,
+    pub priority_tip: PogPriorityTip,
     pub max_fee_wei: Option<U256>,
     pub max_fee_headroom_wei: U256,
     pub check_used_solutions: bool,
     pub dry_run: bool,
     pub wait_for_receipt: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PogPriorityTip {
+    Fixed(U256),
+    Low,
+    Auto,
 }
 
 impl fmt::Debug for PogMintRequest {
@@ -59,7 +67,7 @@ impl fmt::Debug for PogMintRequest {
             .field("chain_id", &self.chain_id)
             .field("nonce", &format_args!("0x{:016x}", self.nonce))
             .field("gas_limit", &self.gas_limit)
-            .field("priority_tip_wei", &self.priority_tip_wei)
+            .field("priority_tip", &self.priority_tip)
             .field("max_fee_wei", &self.max_fee_wei)
             .field("max_fee_headroom_wei", &self.max_fee_headroom_wei)
             .field("check_used_solutions", &self.check_used_solutions)
@@ -302,7 +310,7 @@ pub async fn submit_pog_mine(request: PogMintRequest) -> Result<PogMintOutcome, 
         None
     };
 
-    let priority_tip = request.priority_tip_wei;
+    let priority_tip = resolve_priority_tip(client.as_ref(), &request.priority_tip).await?;
     let max_fee = match request.max_fee_wei {
         Some(value) => value,
         None => {
@@ -380,6 +388,46 @@ pub async fn submit_pog_mine(request: PogMintRequest) -> Result<PogMintOutcome, 
         }
     }
     Ok(outcome)
+}
+
+async fn resolve_priority_tip<M>(
+    client: &M,
+    priority_tip: &PogPriorityTip,
+) -> Result<U256, MiningError>
+where
+    M: Middleware,
+{
+    match priority_tip {
+        PogPriorityTip::Fixed(value) => Ok(*value),
+        PogPriorityTip::Low => resolve_low_priority_tip(client).await,
+        PogPriorityTip::Auto => {
+            let (_, tip) = client
+                .estimate_eip1559_fees(None)
+                .await
+                .map_err(|error| message(format!("POG EIP-1559 fee estimate failed: {error}")))?;
+            Ok(tip)
+        }
+    }
+}
+
+async fn resolve_low_priority_tip<M>(client: &M) -> Result<U256, MiningError>
+where
+    M: Middleware,
+{
+    let floor = U256::from(DEFAULT_POG_LOW_PRIORITY_TIP_FLOOR_WEI);
+    let fee_history = match client.fee_history(8u64, BlockNumber::Latest, &[10.0]).await {
+        Ok(fee_history) => fee_history,
+        Err(_) => return Ok(floor),
+    };
+    let mut rewards = fee_history
+        .reward
+        .iter()
+        .filter_map(|block| block.first().copied())
+        .filter(|value| !value.is_zero())
+        .collect::<Vec<_>>();
+    rewards.sort_unstable();
+    let tip = rewards.first().copied().unwrap_or(floor);
+    if tip < floor { Ok(floor) } else { Ok(tip) }
 }
 
 fn blocks_left_in_epoch(block_number: u64, epoch_length: u64) -> u64 {
@@ -643,5 +691,14 @@ mod tests {
     fn parses_uint256_values() {
         assert_eq!(parse_pog_u256("0x2a").unwrap(), U256::from(42u64));
         assert_eq!(parse_pog_u256("42").unwrap(), U256::from(42u64));
+    }
+
+    #[test]
+    fn priority_tip_debug_does_not_panic() {
+        let mode = PogPriorityTip::Fixed(U256::from(DEFAULT_POG_PRIORITY_TIP_WEI));
+        assert_eq!(
+            format!("{mode:?}"),
+            format!("Fixed({})", DEFAULT_POG_PRIORITY_TIP_WEI)
+        );
     }
 }

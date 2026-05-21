@@ -21,8 +21,8 @@ use mining::h256hash::{
 use mining::pog_tx::{
     DEFAULT_POG_CHAIN_ID, DEFAULT_POG_CONTRACT_ADDRESS, DEFAULT_POG_GAS_LIMIT,
     DEFAULT_POG_MAX_FEE_HEADROOM_WEI, DEFAULT_POG_PRIORITY_TIP_WEI, DEFAULT_POG_RPC_URL,
-    PogMiningRound, PogMintOutcome, PogMintRequest, parse_pog_u256, pog_address_from_private_key,
-    read_pog_mining_round, read_pog_status, submit_pog_mine,
+    PogMiningRound, PogMintOutcome, PogMintRequest, PogPriorityTip, parse_pog_u256,
+    pog_address_from_private_key, read_pog_mining_round, read_pog_status, submit_pog_mine,
 };
 use rand as _;
 use reqwest as _;
@@ -262,7 +262,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             chain_id: args.chain_id,
             nonce: result.nonce,
             gas_limit: args.gas_limit,
-            priority_tip_wei: args.priority_tip_wei,
+            priority_tip: args.priority_tip.clone(),
             max_fee_wei: args.max_fee_wei,
             max_fee_headroom_wei: args.max_fee_headroom_wei,
             check_used_solutions: !args.skip_used_solutions_check,
@@ -352,7 +352,7 @@ struct Args {
     post_submit_sleep_secs: u64,
     min_blocks_left: u64,
     gas_limit: Option<u64>,
-    priority_tip_wei: U256,
+    priority_tip: PogPriorityTip,
     max_fee_wei: Option<U256>,
     max_fee_headroom_wei: U256,
     skip_used_solutions_check: bool,
@@ -389,7 +389,7 @@ impl Default for Args {
             post_submit_sleep_secs: 3,
             min_blocks_left: 2,
             gas_limit: Some(DEFAULT_POG_GAS_LIMIT),
-            priority_tip_wei: U256::from(DEFAULT_POG_PRIORITY_TIP_WEI),
+            priority_tip: PogPriorityTip::Fixed(U256::from(DEFAULT_POG_PRIORITY_TIP_WEI)),
             max_fee_wei: None,
             max_fee_headroom_wei: U256::from(DEFAULT_POG_MAX_FEE_HEADROOM_WEI),
             skip_used_solutions_check: false,
@@ -478,12 +478,12 @@ impl Args {
                     };
                 }
                 "--priority-tip-gwei" => {
-                    let gwei = next_value(&raw, &mut index, "--priority-tip-gwei")?;
-                    args.priority_tip_wei = gwei_to_wei(gwei)?;
+                    let value = next_value(&raw, &mut index, "--priority-tip-gwei")?;
+                    args.priority_tip = parse_priority_tip_gwei(value)?;
                 }
                 "--priority-tip-wei" => {
-                    args.priority_tip_wei =
-                        parse_pog_u256(next_value(&raw, &mut index, "--priority-tip-wei")?)?
+                    let value = next_value(&raw, &mut index, "--priority-tip-wei")?;
+                    args.priority_tip = parse_priority_tip_wei(value)?;
                 }
                 "--max-fee-wei" => {
                     args.max_fee_wei = Some(parse_pog_u256(next_value(
@@ -552,6 +552,26 @@ fn gwei_to_wei(value: &str) -> Result<U256, Box<dyn Error>> {
         return Err(format!("gwei value out of range: {value}").into());
     }
     Ok(U256::from(wei as u128))
+}
+
+fn parse_priority_tip_gwei(value: &str) -> Result<PogPriorityTip, Box<dyn Error>> {
+    if value.eq_ignore_ascii_case("low") || value.eq_ignore_ascii_case("lowest") {
+        return Ok(PogPriorityTip::Low);
+    }
+    if value.eq_ignore_ascii_case("auto") {
+        return Ok(PogPriorityTip::Auto);
+    }
+    Ok(PogPriorityTip::Fixed(gwei_to_wei(value)?))
+}
+
+fn parse_priority_tip_wei(value: &str) -> Result<PogPriorityTip, Box<dyn Error>> {
+    if value.eq_ignore_ascii_case("low") || value.eq_ignore_ascii_case("lowest") {
+        return Ok(PogPriorityTip::Low);
+    }
+    if value.eq_ignore_ascii_case("auto") {
+        return Ok(PogPriorityTip::Auto);
+    }
+    Ok(PogPriorityTip::Fixed(parse_pog_u256(value)?))
 }
 
 fn resolve_rpc_url(args: &Args) -> String {
@@ -667,8 +687,10 @@ Submit options:
   --contract ADDRESS       POG contract, default {default_contract}
   --chain-id N             EVM chain ID, default 1
   --gas-limit N|auto       default 300000; auto uses estimate * 1.2
-  --priority-tip-gwei F    EIP-1559 maxPriorityFeePerGas in gwei, default 1.0
-  --priority-tip-wei N     same in wei
+  --priority-tip-gwei F|low|auto
+                           EIP-1559 maxPriorityFeePerGas; low uses feeHistory p10
+  --priority-tip-wei N|low|auto
+                           same in wei
   --max-fee-wei N          fixed cap on maxFeePerGas (default: base_fee + tip + 5 gwei)
   --max-fee-headroom-gwei F   gwei added on top of (base_fee + tip), default 5
   --skip-used-solutions-check  skip usedSolutions(hash) preflight
