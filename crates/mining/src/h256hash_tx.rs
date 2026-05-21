@@ -259,10 +259,9 @@ pub async fn read_h256hash_status(
         read_uint_constant_with_client(&provider, contract_address, "MAX_MINTS_PER_BLOCK")
             .await
             .unwrap_or(U256::from(10u64));
-    let epoch_blocks =
-        read_uint_constant_with_client(&provider, contract_address, "EPOCH_BLOCKS")
-            .await
-            .unwrap_or(U256::from(100u64));
+    let epoch_blocks = read_uint_constant_with_client(&provider, contract_address, "EPOCH_BLOCKS")
+        .await
+        .unwrap_or(U256::from(100u64));
     Ok(H256HashChainStatus {
         account_address: format_address(account_address),
         contract_address: format_address(contract_address),
@@ -342,7 +341,9 @@ where
             out.copy_from_slice(bytes);
             Ok(out)
         }
-        _ => Err(message("HASH256 getChallenge returned unexpected ABI output")),
+        _ => Err(message(
+            "HASH256 getChallenge returned unexpected ABI output",
+        )),
     }
 }
 

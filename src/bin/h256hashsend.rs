@@ -140,8 +140,7 @@ impl Args {
                         Some(next_value(&raw, &mut index, "--private-key-env")?.to_string())
                 }
                 "--contract" | "--contract-address" => {
-                    args.contract_address =
-                        next_value(&raw, &mut index, "--contract")?.to_string()
+                    args.contract_address = next_value(&raw, &mut index, "--contract")?.to_string()
                 }
                 "--chain-id" => {
                     args.chain_id = parse_u64(next_value(&raw, &mut index, "--chain-id")?)?
@@ -154,11 +153,8 @@ impl Args {
                     args.priority_tip_wei = gwei_to_wei(gwei)?;
                 }
                 "--priority-tip-wei" => {
-                    args.priority_tip_wei = parse_h256hash_u256(next_value(
-                        &raw,
-                        &mut index,
-                        "--priority-tip-wei",
-                    )?)?
+                    args.priority_tip_wei =
+                        parse_h256hash_u256(next_value(&raw, &mut index, "--priority-tip-wei")?)?
                 }
                 "--max-fee-wei" => {
                     args.max_fee_wei = Some(parse_h256hash_u256(next_value(
