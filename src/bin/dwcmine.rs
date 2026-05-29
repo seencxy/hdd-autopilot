@@ -93,7 +93,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     );
     if client.proxy_count() > 0 {
         println!(
-            "routing every request through a random proxy from {} ({} entries)",
+            "submitting shares through a random proxy IP from {} ({} entries); config/stats stay direct",
             args.proxies.as_deref().unwrap_or(""),
             client.proxy_count()
         );
@@ -116,6 +116,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut shares_found: u64 = 0;
     let mut shares_submitted: u64 = 0;
     let mut total_attempts: i64 = 0;
+    let mut mine_secs: f64 = 0.0;
     let run_start = Instant::now();
     let mut last_stats = Instant::now();
     let mut last_submit = Instant::now()
@@ -152,11 +153,13 @@ fn run() -> Result<(), Box<dyn Error>> {
             ..DwcMineConfig::default()
         };
 
+        let mine_start = Instant::now();
         let share = if args.cpu_only {
             mine_dwc_cpu(&job, mine_config, &cancel)
         } else {
             mine_dwc(&job, mine_config, &cancel)
         };
+        mine_secs += mine_start.elapsed().as_secs_f64();
         let share = match share {
             Ok(share) => share,
             Err(error) => {
@@ -230,11 +233,10 @@ fn run() -> Result<(), Box<dyn Error>> {
         counter = share.counter.wrapping_add(1);
 
         if last_stats.elapsed() >= STATS_INTERVAL {
-            let secs = run_start.elapsed().as_secs_f64().max(0.001);
+            let wall = run_start.elapsed().as_secs_f64().max(0.001);
+            let gpu_rate = total_attempts as f64 / mine_secs.max(0.001) / 1.0e6;
             println!(
-                "[stats] found={shares_found} submitted={shares_submitted} attempts={total_attempts} rate={:.2} MH/s elapsed={:.0}s",
-                total_attempts as f64 / secs / 1.0e6,
-                secs
+                "[stats] found={shares_found} submitted={shares_submitted} attempts={total_attempts} gpu_rate={gpu_rate:.1} MH/s mine_time={mine_secs:.1}s wall={wall:.0}s",
             );
             last_stats = Instant::now();
         }
@@ -249,10 +251,10 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    let secs = run_start.elapsed().as_secs_f64().max(0.001);
+    let wall = run_start.elapsed().as_secs_f64().max(0.001);
+    let gpu_rate = total_attempts as f64 / mine_secs.max(0.001) / 1.0e6;
     println!(
-        "done: found={shares_found} submitted={shares_submitted} attempts={total_attempts} avg_rate={:.2} MH/s",
-        total_attempts as f64 / secs / 1.0e6
+        "done: found={shares_found} submitted={shares_submitted} attempts={total_attempts} gpu_rate={gpu_rate:.1} MH/s mine_time={mine_secs:.1}s wall={wall:.0}s",
     );
     Ok(())
 }

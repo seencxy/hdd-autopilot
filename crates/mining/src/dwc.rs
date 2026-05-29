@@ -512,11 +512,14 @@ pub struct DwcStats {
 }
 
 fn build_dwc_http_client(proxy_url: Option<&str>) -> Result<reqwest::blocking::Client, MiningError> {
+    // Keep-alive is left on: with many proxy entries each client pins its own
+    // (rotating) exit IP, so random selection already spreads submits across
+    // IPs without paying a fresh TLS handshake on every request. Timeouts keep
+    // a dead/slow proxy from stalling the loop.
     let mut builder = reqwest::blocking::Client::builder()
         .user_agent("Mozilla/5.0 (compatible; dwcmine/0.1)")
-        // Force a fresh upstream connection per request so a rotating
-        // residential proxy hands out a new exit IP every submit.
-        .pool_max_idle_per_host(0);
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(20));
     if let Some(proxy_url) = proxy_url {
         builder = builder.proxy(reqwest::Proxy::all(proxy_url)?);
     }
@@ -592,14 +595,16 @@ impl DwcClient {
         }
     }
 
+    // config/stats are public reads and go direct (fast); only share
+    // submission is spread across random proxy IPs.
     pub fn config(&self) -> Result<DwcConfig, MiningError> {
         let url = format!("{}/mine/config", self.base);
-        decode(self.pick().get(url).send()?)
+        decode(self.direct.get(url).send()?)
     }
 
     pub fn stats(&self, address: &str) -> Result<DwcStats, MiningError> {
         let url = format!("{}/mine/stats/{}", self.base, address);
-        decode(self.pick().get(url).send()?)
+        decode(self.direct.get(url).send()?)
     }
 
     /// Submit a share through a randomly-selected proxy IP. Returns the raw
