@@ -409,10 +409,18 @@ fn run_multi(args: &Args) -> Result<(), Box<dyn Error>> {
 
                     let salt = random_salt(&mut rng);
                     let mut counter = 0u64;
-                    let mut errors = 0u32;
+                    let mut consec_429 = 0u32;
+                    let mut consec_neterr = 0u32;
                     let mut addr_shares = 0u64;
+                    let mut addr_submitted = 0u64;
                     // Safety bound if a submit response ever omits the cap field.
                     const MAX_SHARES_PER_ADDRESS: u64 = 1000;
+                    // Only give up an address after the daily cap, or after
+                    // *repeated* rate-limits / network failures — never on a
+                    // single transient proxy error (that would burn a wallet
+                    // that still has capacity).
+                    const ROTATE_AFTER_429: u32 = 6;
+                    const ROTATE_AFTER_NETERR: u32 = 10;
                     loop {
                         if cancel.load(Ordering::SeqCst) {
                             break;
@@ -442,38 +450,67 @@ fn run_multi(args: &Args) -> Result<(), Box<dyn Error>> {
                         }
                         match client.submit(&wallet.address, &epoch, &share.nonce) {
                             Ok(body) => {
-                                errors = 0;
+                                consec_429 = 0;
+                                consec_neterr = 0;
+                                addr_submitted += 1;
                                 total_submitted.fetch_add(1, Ordering::Relaxed);
                                 if body.get("dailyAddrRemaining").and_then(|v| v.as_i64())
                                     == Some(0)
                                 {
                                     println!(
-                                        "[wallet #{}] {} — full ({} shares today), creating next",
+                                        "[wallet #{}] {} — full ({} submitted today), creating next",
                                         existing + n,
                                         wallet.address,
-                                        addr_shares
+                                        addr_submitted
                                     );
                                     break;
                                 }
+                                if min_interval > 0 {
+                                    std::thread::sleep(Duration::from_millis(min_interval));
+                                }
                             }
                             Err(error) => {
-                                errors += 1;
                                 let msg = error.to_string();
-                                if msg.contains("429") || msg.contains("limit") || errors >= 3 {
-                                    println!(
-                                        "[wallet #{}] {} — limited/error, creating next",
-                                        existing + n,
-                                        wallet.address
-                                    );
-                                    break;
+                                let rate_limited = msg.contains("429");
+                                if rate_limited {
+                                    // Per-address rate limit: back off and retry
+                                    // the SAME address; only rotate if it keeps
+                                    // happening (likely genuinely exhausted).
+                                    consec_429 += 1;
+                                    if consec_429 >= ROTATE_AFTER_429 {
+                                        println!(
+                                            "[wallet #{}] {} — repeatedly rate-limited (429), creating next",
+                                            existing + n, wallet.address
+                                        );
+                                        break;
+                                    }
+                                    let backoff = 200u64.saturating_mul(consec_429 as u64).min(3000);
+                                    std::thread::sleep(Duration::from_millis(backoff));
+                                } else {
+                                    // Transient network/proxy error: retry, do
+                                    // NOT burn this address. Surface the reason.
+                                    consec_neterr += 1;
+                                    if consec_neterr == 1 || consec_neterr % 10 == 0 {
+                                        let short: String = msg.chars().take(120).collect();
+                                        eprintln!(
+                                            "[wallet #{}] submit error ({}x): {}",
+                                            existing + n, consec_neterr, short
+                                        );
+                                    }
+                                    if consec_neterr >= ROTATE_AFTER_NETERR {
+                                        println!(
+                                            "[wallet #{}] {} — submit failing persistently (check proxies), creating next",
+                                            existing + n, wallet.address
+                                        );
+                                        break;
+                                    }
+                                    let backoff = 100u64.saturating_mul(consec_neterr as u64).min(2000);
+                                    std::thread::sleep(Duration::from_millis(backoff));
                                 }
                             }
                         }
                         if addr_shares >= MAX_SHARES_PER_ADDRESS {
                             break;
-                        }
-                        if min_interval > 0 {
-                            std::thread::sleep(Duration::from_millis(min_interval));
                         }
                     }
                     active.fetch_sub(1, Ordering::Relaxed);
