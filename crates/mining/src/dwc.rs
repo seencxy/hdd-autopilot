@@ -97,6 +97,7 @@ impl DwcJob {
 pub enum DwcBackend {
     Cpu,
     Metal,
+    Cuda,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,8 +118,13 @@ pub struct DwcMineConfig {
     pub cpu_threads: usize,
     pub prefer_gpu: bool,
     pub allow_cpu_fallback: bool,
-    pub metal_device_index: usize,
+    pub gpu_device_index: usize,
     pub metal_batch_size: u64,
+    pub cuda_batch_size: u64,
+    pub cuda_threads_per_block: u32,
+    pub cuda_nonces_per_thread: u32,
+    pub cuda_max_blocks: u32,
+    pub cuda_early_exit: bool,
 }
 
 impl Default for DwcMineConfig {
@@ -131,8 +137,13 @@ impl Default for DwcMineConfig {
                 .unwrap_or(1),
             prefer_gpu: true,
             allow_cpu_fallback: true,
-            metal_device_index: 0,
+            gpu_device_index: 0,
             metal_batch_size: 1 << 22,
+            cuda_batch_size: 1 << 26,
+            cuda_threads_per_block: 256,
+            cuda_nonces_per_thread: 4,
+            cuda_max_blocks: 0,
+            cuda_early_exit: true,
         }
     }
 }
@@ -236,12 +247,22 @@ pub fn mine_dwc(
         ));
     }
     if config.prefer_gpu {
+        // Try CUDA (NVIDIA) first, then Metal (Apple), then fall back to CPU.
+        match mine_dwc_cuda(job, config, cancel) {
+            Ok(Some(result)) => return Ok(result),
+            Ok(None) => {}
+            Err(error) => {
+                if cancel.load(Ordering::SeqCst) {
+                    return Err(error);
+                }
+            }
+        }
         match mine_dwc_metal(job, config, cancel) {
             Ok(Some(result)) => return Ok(result),
             Ok(None) => {
                 if !config.allow_cpu_fallback {
                     return Err(MiningError::Message(
-                        "Metal backend is not available for DWC mining.".to_string(),
+                        "No GPU backend (CUDA/Metal) is available for DWC mining.".to_string(),
                     ));
                 }
             }
@@ -363,7 +384,7 @@ fn mine_dwc_metal(
         difficulty_bits: prepared.difficulty_bits(),
     };
     let mut session = mining_metal_sys::dwc_create_session(
-        config.metal_device_index,
+        config.gpu_device_index,
         &raw_job,
         mining_metal_sys::DwcMetalSolverConfig { batch_size },
         start,
@@ -391,6 +412,72 @@ fn mine_dwc_metal(
                 digest_hex,
                 attempts: result.attempts,
                 backend: DwcBackend::Metal,
+            }));
+        }
+        start = start.wrapping_add(batch_size);
+        remaining = remaining.saturating_sub(batch_size);
+    }
+    let _ = start;
+    Ok(None)
+}
+
+fn mine_dwc_cuda(
+    job: &DwcJob,
+    config: DwcMineConfig,
+    cancel: &Arc<AtomicBool>,
+) -> Result<Option<DwcShare>, MiningError> {
+    if !mining_cuda_sys::dwc_is_available()
+        .map_err(MiningError::Message)
+        .unwrap_or(false)
+    {
+        return Ok(None);
+    }
+
+    let prepared = DwcPreparedJob::new(job);
+    let prefix = job.prefix_bytes();
+    let batch_size = config.cuda_batch_size.max(1);
+    let mut start = config.start_counter;
+    let mut remaining = config.counter_count;
+
+    let raw_job = mining_cuda_sys::DwcCudaJob {
+        prefix: &prefix,
+        difficulty_bits: prepared.difficulty_bits(),
+    };
+    let mut session = mining_cuda_sys::dwc_create_session(
+        config.gpu_device_index,
+        &raw_job,
+        mining_cuda_sys::DwcCudaSolverConfig {
+            batch_size,
+            threads_per_block: config.cuda_threads_per_block,
+            nonces_per_thread: config.cuda_nonces_per_thread,
+            max_blocks: config.cuda_max_blocks,
+            early_exit: config.cuda_early_exit,
+        },
+        start,
+    )
+    .map_err(MiningError::Message)?;
+
+    while remaining > 0 {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(crate::error::interrupted_error());
+        }
+        let result = session.mine_next_batch().map_err(MiningError::Message)?;
+        if result.found {
+            // Re-verify on the host so we never submit a bad share.
+            let digest = prepared.digest(result.nonce);
+            let digest_hex = hex_lower(&digest);
+            if leading_zero_bits(&digest) < prepared.difficulty_bits() {
+                return Err(MiningError::Message(
+                    "CUDA DWC backend returned a counter below the requested difficulty."
+                        .to_string(),
+                ));
+            }
+            return Ok(Some(DwcShare {
+                counter: result.nonce,
+                nonce: prepared.nonce_string(result.nonce),
+                digest_hex,
+                attempts: result.attempts,
+                backend: DwcBackend::Cuda,
             }));
         }
         start = start.wrapping_add(batch_size);

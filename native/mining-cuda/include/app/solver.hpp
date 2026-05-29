@@ -128,6 +128,53 @@ private:
     std::uint64_t attempts_ = 0;
 };
 
+struct DwcCudaBatchResult {
+    bool found = false;
+    std::uint64_t nonce = 0;
+    std::int64_t attempts = 0;
+    std::array<std::uint8_t, 32> digest{};
+};
+
+class DwcCudaSession {
+public:
+    DwcCudaSession(
+        std::size_t device_index,
+        const std::uint8_t* prefix,
+        std::size_t prefix_len,
+        std::uint32_t difficulty_bits,
+        std::uint64_t batch_size,
+        std::uint64_t start_nonce,
+        std::uint32_t threads_per_block,
+        std::uint32_t nonces_per_thread,
+        std::uint32_t max_blocks,
+        bool early_exit);
+    ~DwcCudaSession();
+
+    DwcCudaSession(const DwcCudaSession&) = delete;
+    DwcCudaSession& operator=(const DwcCudaSession&) = delete;
+    DwcCudaSession(DwcCudaSession&&) = delete;
+    DwcCudaSession& operator=(DwcCudaSession&&) = delete;
+
+    DwcCudaBatchResult mine_next_batch();
+
+private:
+    int device_index_ = 0;
+    void* device_result_ = nullptr;
+    std::array<std::uint32_t, 8> initial_state_{};
+    std::array<std::uint32_t, 32> template_words_{};
+    std::uint32_t prefix_len_ = 0;
+    std::uint32_t nonce_offset_ = 0;
+    std::uint32_t difficulty_bits_ = 0;
+    std::uint32_t block_count_ = 0;
+    std::uint32_t threads_per_block_ = 0;
+    std::uint32_t nonces_per_thread_ = 0;
+    std::uint32_t max_blocks_ = 0;
+    bool early_exit_ = true;
+    std::uint64_t batch_size_ = 0;
+    std::uint64_t next_nonce_ = 0;
+    std::uint64_t attempts_ = 0;
+};
+
 class H98HashCudaSession {
 public:
     H98HashCudaSession(

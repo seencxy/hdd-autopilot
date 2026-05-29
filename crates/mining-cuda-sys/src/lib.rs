@@ -146,6 +146,35 @@ pub struct mining_cuda_h256hash_session {
     _private: [u8; 0],
 }
 
+#[repr(C)]
+pub struct mining_cuda_dwc_session {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct mining_cuda_dwc_solver_config {
+    pub batch_size: u64,
+    pub threads_per_block: u32,
+    pub nonces_per_thread: u32,
+    pub max_blocks: u32,
+    pub early_exit: bool,
+}
+
+#[repr(C)]
+pub struct mining_cuda_dwc_job {
+    pub prefix_ptr: *const u8,
+    pub prefix_len: usize,
+    pub difficulty_bits: u32,
+}
+
+#[repr(C)]
+pub struct mining_cuda_dwc_mine_result {
+    pub found: bool,
+    pub nonce: u64,
+    pub attempts: i64,
+    pub digest_hex: [u8; 65],
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CudaSolverConfig {
     pub batch_size: usize,
@@ -275,10 +304,38 @@ pub struct H256HashCudaMiningSession {
     raw: *mut mining_cuda_h256hash_session,
 }
 
+pub struct DwcCudaMiningSession {
+    raw: *mut mining_cuda_dwc_session,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DwcCudaSolverConfig {
+    pub batch_size: u64,
+    pub threads_per_block: u32,
+    pub nonces_per_thread: u32,
+    pub max_blocks: u32,
+    pub early_exit: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DwcCudaJob<'a> {
+    pub prefix: &'a [u8],
+    pub difficulty_bits: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DwcCudaMineResult {
+    pub found: bool,
+    pub nonce: u64,
+    pub attempts: i64,
+    pub digest_hex: String,
+}
+
 unsafe impl Send for CudaMiningSession {}
 unsafe impl Send for Rpow2CudaMiningSession {}
 unsafe impl Send for H98HashCudaMiningSession {}
 unsafe impl Send for H256HashCudaMiningSession {}
+unsafe impl Send for DwcCudaMiningSession {}
 
 unsafe extern "C" {
     fn mining_cuda_is_available() -> bool;
@@ -334,6 +391,18 @@ unsafe extern "C" {
         result: *mut mining_cuda_rpow2_mine_result,
     ) -> bool;
     fn mining_cuda_rpow2_session_destroy(session: *mut mining_cuda_rpow2_session);
+    fn mining_cuda_dwc_is_available() -> bool;
+    fn mining_cuda_dwc_session_create(
+        device_index: usize,
+        job: *const mining_cuda_dwc_job,
+        config: *const mining_cuda_dwc_solver_config,
+        start_nonce: u64,
+    ) -> *mut mining_cuda_dwc_session;
+    fn mining_cuda_dwc_session_mine_next_batch(
+        session: *mut mining_cuda_dwc_session,
+        result: *mut mining_cuda_dwc_mine_result,
+    ) -> bool;
+    fn mining_cuda_dwc_session_destroy(session: *mut mining_cuda_dwc_session);
     fn mining_cuda_rpow2_benchmark(
         device_index: usize,
         job: *const mining_cuda_rpow2_job,
@@ -1002,6 +1071,105 @@ impl CudaMiningSession {
                 attempts: raw_result.attempts,
                 digest_hex,
             })
+        }
+    }
+}
+
+pub fn dwc_is_available() -> Result<bool, String> {
+    #[cfg(not(mining_cuda_supported_target))]
+    {
+        Ok(false)
+    }
+    #[cfg(all(mining_cuda_supported_target, not(mining_cuda_native_enabled)))]
+    {
+        Err("CUDA native backend is not enabled in this build.".to_string())
+    }
+    #[cfg(mining_cuda_native_enabled)]
+    unsafe {
+        if mining_cuda_dwc_is_available() {
+            Ok(true)
+        } else {
+            Err(last_error_message())
+        }
+    }
+}
+
+pub fn dwc_create_session(
+    device_index: usize,
+    job: &DwcCudaJob<'_>,
+    config: DwcCudaSolverConfig,
+    start_nonce: u64,
+) -> Result<DwcCudaMiningSession, String> {
+    #[cfg(not(mining_cuda_native_enabled))]
+    {
+        let _ = (device_index, job, config, start_nonce);
+        Err("CUDA backend is not enabled on this platform.".to_string())
+    }
+    #[cfg(mining_cuda_native_enabled)]
+    unsafe {
+        let raw_job = mining_cuda_dwc_job {
+            prefix_ptr: job.prefix.as_ptr(),
+            prefix_len: job.prefix.len(),
+            difficulty_bits: job.difficulty_bits,
+        };
+        let raw_config = mining_cuda_dwc_solver_config {
+            batch_size: config.batch_size,
+            threads_per_block: config.threads_per_block,
+            nonces_per_thread: config.nonces_per_thread,
+            max_blocks: config.max_blocks,
+            early_exit: config.early_exit,
+        };
+        let raw = mining_cuda_dwc_session_create(device_index, &raw_job, &raw_config, start_nonce);
+        if raw.is_null() {
+            Err(last_error_message())
+        } else {
+            Ok(DwcCudaMiningSession { raw })
+        }
+    }
+}
+
+impl DwcCudaMiningSession {
+    pub fn mine_next_batch(&mut self) -> Result<DwcCudaMineResult, String> {
+        #[cfg(not(mining_cuda_native_enabled))]
+        {
+            Err("CUDA backend is not enabled on this platform.".to_string())
+        }
+        #[cfg(mining_cuda_native_enabled)]
+        unsafe {
+            let mut raw_result = mining_cuda_dwc_mine_result {
+                found: false,
+                nonce: 0,
+                attempts: 0,
+                digest_hex: [0; 65],
+            };
+            if !mining_cuda_dwc_session_mine_next_batch(self.raw, &mut raw_result) {
+                return Err(last_error_message());
+            }
+            let digest_len = raw_result
+                .digest_hex
+                .iter()
+                .position(|byte| *byte == 0)
+                .unwrap_or(raw_result.digest_hex.len());
+            let digest_hex =
+                String::from_utf8_lossy(&raw_result.digest_hex[..digest_len]).to_string();
+            Ok(DwcCudaMineResult {
+                found: raw_result.found,
+                nonce: raw_result.nonce,
+                attempts: raw_result.attempts,
+                digest_hex,
+            })
+        }
+    }
+}
+
+impl Drop for DwcCudaMiningSession {
+    fn drop(&mut self) {
+        #[cfg(mining_cuda_native_enabled)]
+        unsafe {
+            if !self.raw.is_null() {
+                mining_cuda_dwc_session_destroy(self.raw);
+                self.raw = std::ptr::null_mut();
+            }
         }
     }
 }

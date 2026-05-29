@@ -31,6 +31,7 @@ struct mining_cuda_session;
 struct mining_cuda_rpow2_session;
 struct mining_cuda_h98hash_session;
 struct mining_cuda_h256hash_session;
+struct mining_cuda_dwc_session;
 
 struct mining_cuda_rpow2_solver_config {
     std::uint64_t batch_size;
@@ -163,6 +164,36 @@ MINING_CUDA_EXPORT bool mining_cuda_rpow2_session_mine_next_batch(
     mining_cuda_rpow2_session* session,
     mining_cuda_rpow2_mine_result* result);
 MINING_CUDA_EXPORT void mining_cuda_rpow2_session_destroy(mining_cuda_rpow2_session* session);
+// DigitalWaterCoin (DWC): sha256("address|epoch|salt" + 16-hex counter),
+// difficulty in leading zero bits. `prefix_ptr` is the constant ASCII prefix.
+struct mining_cuda_dwc_solver_config {
+    std::uint64_t batch_size;
+    std::uint32_t threads_per_block;
+    std::uint32_t nonces_per_thread;
+    std::uint32_t max_blocks;
+    bool early_exit;
+};
+struct mining_cuda_dwc_job {
+    const std::uint8_t* prefix_ptr;
+    std::size_t prefix_len;
+    std::uint32_t difficulty_bits;
+};
+struct mining_cuda_dwc_mine_result {
+    bool found;
+    std::uint64_t nonce;
+    std::int64_t attempts;
+    char digest_hex[65];
+};
+MINING_CUDA_EXPORT bool mining_cuda_dwc_is_available();
+MINING_CUDA_EXPORT mining_cuda_dwc_session* mining_cuda_dwc_session_create(
+    std::size_t device_index,
+    const mining_cuda_dwc_job* job,
+    const mining_cuda_dwc_solver_config* config,
+    std::uint64_t start_nonce);
+MINING_CUDA_EXPORT bool mining_cuda_dwc_session_mine_next_batch(
+    mining_cuda_dwc_session* session,
+    mining_cuda_dwc_mine_result* result);
+MINING_CUDA_EXPORT void mining_cuda_dwc_session_destroy(mining_cuda_dwc_session* session);
 MINING_CUDA_EXPORT bool mining_cuda_rpow2_benchmark(
     std::size_t device_index,
     const mining_cuda_rpow2_job* job,

@@ -1961,6 +1961,401 @@ Rpow2CudaSession::~Rpow2CudaSession() {
 	    return benchmark;
 	}
 
+// --- DigitalWaterCoin (DWC) CUDA path -------------------------------------
+// Mirrors the rpow2 SHA-256 machinery (reuses rpow2_compress_block /
+// rpow2_compress_host / kRpow2Sha256K / digest_words_to_bytes / check_cuda),
+// but the per-thread counter is written as 16 ASCII hex bytes (it lives inside
+// the UTF-8 string "address|epoch|nonce") and difficulty counts leading zero
+// bits.
+namespace {
+
+struct DwcCudaKernelParams {
+    std::uint32_t difficulty_bits;
+    std::uint32_t block_count;
+    std::uint32_t nonce_offset;
+    std::uint32_t padding;
+    std::uint32_t initial_state[8];
+    std::uint32_t template_words[32];
+    unsigned long long start_nonce;
+    unsigned long long batch_size;
+};
+
+struct DwcCudaDeviceResult {
+    unsigned int found;
+    unsigned long long nonce;
+    std::uint32_t digest_words[8];
+};
+
+__device__ void dwc_write_nonce_words(std::uint32_t* w,
+                                      std::uint32_t block,
+                                      std::uint32_t nonce_offset,
+                                      unsigned long long nonce) {
+    for (std::uint32_t i = 0; i < 16u; ++i) {
+        const std::uint32_t absolute_byte = nonce_offset + i;
+        if ((absolute_byte >> 6) != block) {
+            continue;
+        }
+        const std::uint32_t nibble =
+            static_cast<std::uint32_t>((nonce >> ((15u - i) * 4u)) & 0xfull);
+        const std::uint32_t ascii = nibble < 10u ? (0x30u + nibble) : (0x61u + nibble - 10u);
+        const std::uint32_t block_byte = absolute_byte & 63u;
+        const std::uint32_t word_index = block_byte >> 2;
+        const std::uint32_t byte_index = block_byte & 3u;
+        const std::uint32_t shift = (3u - byte_index) * 8u;
+        w[word_index] |= ascii << shift;
+    }
+}
+
+__device__ __forceinline__ std::uint32_t dwc_leading_zero_bits(std::uint32_t h0,
+                                                               std::uint32_t h1,
+                                                               std::uint32_t h2,
+                                                               std::uint32_t h3,
+                                                               std::uint32_t h4,
+                                                               std::uint32_t h5,
+                                                               std::uint32_t h6,
+                                                               std::uint32_t h7) {
+    if (h0 != 0u) return static_cast<std::uint32_t>(__clz(h0));
+    if (h1 != 0u) return 32u + static_cast<std::uint32_t>(__clz(h1));
+    if (h2 != 0u) return 64u + static_cast<std::uint32_t>(__clz(h2));
+    if (h3 != 0u) return 96u + static_cast<std::uint32_t>(__clz(h3));
+    if (h4 != 0u) return 128u + static_cast<std::uint32_t>(__clz(h4));
+    if (h5 != 0u) return 160u + static_cast<std::uint32_t>(__clz(h5));
+    if (h6 != 0u) return 192u + static_cast<std::uint32_t>(__clz(h6));
+    if (h7 != 0u) return 224u + static_cast<std::uint32_t>(__clz(h7));
+    return 256u;
+}
+
+__device__ __forceinline__ bool dwc_meets_difficulty_words(std::uint32_t h0,
+                                                            std::uint32_t h1,
+                                                            std::uint32_t h2,
+                                                            std::uint32_t h3,
+                                                            std::uint32_t h4,
+                                                            std::uint32_t h5,
+                                                            std::uint32_t h6,
+                                                            std::uint32_t h7,
+                                                            std::uint32_t difficulty_bits) {
+    return dwc_leading_zero_bits(h0, h1, h2, h3, h4, h5, h6, h7) >= difficulty_bits;
+}
+
+__device__ __forceinline__ void dwc_hash_nonce(const DwcCudaKernelParams& params,
+                                               unsigned long long nonce,
+                                               std::uint32_t* h0,
+                                               std::uint32_t* h1,
+                                               std::uint32_t* h2,
+                                               std::uint32_t* h3,
+                                               std::uint32_t* h4,
+                                               std::uint32_t* h5,
+                                               std::uint32_t* h6,
+                                               std::uint32_t* h7) {
+    *h0 = params.initial_state[0];
+    *h1 = params.initial_state[1];
+    *h2 = params.initial_state[2];
+    *h3 = params.initial_state[3];
+    *h4 = params.initial_state[4];
+    *h5 = params.initial_state[5];
+    *h6 = params.initial_state[6];
+    *h7 = params.initial_state[7];
+
+#pragma unroll 2
+    for (std::uint32_t block = 0; block < params.block_count; ++block) {
+        std::uint32_t w[16];
+#pragma unroll
+        for (std::uint32_t i = 0; i < 16; ++i) {
+            w[i] = params.template_words[block * 16u + i];
+        }
+        dwc_write_nonce_words(w, block, params.nonce_offset, nonce);
+        rpow2_compress_block(h0, h1, h2, h3, h4, h5, h6, h7, w);
+    }
+}
+
+template <unsigned int NoncesPerThread, bool EarlyExit>
+__global__ __launch_bounds__(512, 2) void dwc_mine_kernel(DwcCudaKernelParams params,
+                                                          DwcCudaDeviceResult* result) {
+    const unsigned long long thread_id = static_cast<unsigned long long>(blockIdx.x)
+        * static_cast<unsigned long long>(blockDim.x)
+        + static_cast<unsigned long long>(threadIdx.x);
+    const unsigned long long thread_stride = static_cast<unsigned long long>(gridDim.x)
+        * static_cast<unsigned long long>(blockDim.x);
+    const unsigned long long group_stride = thread_stride
+        * static_cast<unsigned long long>(NoncesPerThread);
+    const volatile unsigned int* found_flag =
+        reinterpret_cast<const volatile unsigned int*>(&result->found);
+
+    for (unsigned long long group_offset = thread_id * static_cast<unsigned long long>(NoncesPerThread);
+         group_offset < params.batch_size;
+         group_offset += group_stride) {
+        if (EarlyExit && *found_flag != 0u) {
+            return;
+        }
+#pragma unroll
+        for (unsigned int item = 0; item < NoncesPerThread; ++item) {
+            const unsigned long long offset = group_offset + static_cast<unsigned long long>(item);
+            if (offset >= params.batch_size) {
+                return;
+            }
+            const unsigned long long nonce = params.start_nonce + offset;
+            std::uint32_t h0, h1, h2, h3, h4, h5, h6, h7;
+            dwc_hash_nonce(params, nonce, &h0, &h1, &h2, &h3, &h4, &h5, &h6, &h7);
+            if (dwc_meets_difficulty_words(h0, h1, h2, h3, h4, h5, h6, h7, params.difficulty_bits)) {
+                if (atomicCAS(&result->found, 0u, 1u) == 0u) {
+                    result->nonce = nonce;
+                    result->digest_words[0] = h0;
+                    result->digest_words[1] = h1;
+                    result->digest_words[2] = h2;
+                    result->digest_words[3] = h3;
+                    result->digest_words[4] = h4;
+                    result->digest_words[5] = h5;
+                    result->digest_words[6] = h6;
+                    result->digest_words[7] = h7;
+                }
+                return;
+            }
+        }
+    }
+}
+
+template <unsigned int NoncesPerThread>
+void launch_dwc_kernel_early(unsigned int blocks,
+                             unsigned int threads_per_block,
+                             const DwcCudaKernelParams& params,
+                             DwcCudaDeviceResult* result) {
+    dwc_mine_kernel<NoncesPerThread, true><<<blocks, threads_per_block>>>(params, result);
+}
+
+template <unsigned int NoncesPerThread>
+void launch_dwc_kernel_no_early_exit(unsigned int blocks,
+                                     unsigned int threads_per_block,
+                                     const DwcCudaKernelParams& params,
+                                     DwcCudaDeviceResult* result) {
+    dwc_mine_kernel<NoncesPerThread, false><<<blocks, threads_per_block>>>(params, result);
+}
+
+void launch_dwc_kernel(unsigned int blocks,
+                       unsigned int threads_per_block,
+                       std::uint32_t nonces_per_thread,
+                       bool early_exit,
+                       const DwcCudaKernelParams& params,
+                       DwcCudaDeviceResult* result) {
+    switch (nonces_per_thread) {
+    case 1:
+        if (early_exit) launch_dwc_kernel_early<1>(blocks, threads_per_block, params, result);
+        else launch_dwc_kernel_no_early_exit<1>(blocks, threads_per_block, params, result);
+        break;
+    case 2:
+        if (early_exit) launch_dwc_kernel_early<2>(blocks, threads_per_block, params, result);
+        else launch_dwc_kernel_no_early_exit<2>(blocks, threads_per_block, params, result);
+        break;
+    case 4:
+        if (early_exit) launch_dwc_kernel_early<4>(blocks, threads_per_block, params, result);
+        else launch_dwc_kernel_no_early_exit<4>(blocks, threads_per_block, params, result);
+        break;
+    case 8:
+        if (early_exit) launch_dwc_kernel_early<8>(blocks, threads_per_block, params, result);
+        else launch_dwc_kernel_no_early_exit<8>(blocks, threads_per_block, params, result);
+        break;
+    default:
+        throw std::runtime_error("unsupported DWC CUDA nonces_per_thread");
+    }
+}
+
+struct DwcPreparedTail {
+    std::array<std::uint32_t, 8> initial_state{};
+    std::array<std::uint32_t, 32> template_words{};
+    std::uint32_t block_count = 0;
+    std::uint32_t nonce_offset = 0;
+};
+
+DwcPreparedTail build_dwc_prepared_tail(const std::uint8_t* prefix, std::size_t prefix_len) {
+    const auto message_len = prefix_len + 16;  // 16 ASCII hex chars of counter
+    if (prefix_len > 103) {
+        throw std::runtime_error("DWC prefix is too long for CUDA solver");
+    }
+
+    DwcPreparedTail prepared;
+    prepared.initial_state = {
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    };
+
+    const auto full_prefix_blocks = prefix_len / 64;
+    for (std::size_t block = 0; block < full_prefix_blocks; ++block) {
+        rpow2_compress_host(prepared.initial_state, prefix + block * 64);
+    }
+
+    const auto tail_prefix_len = prefix_len % 64;
+    const auto tail_message_len = tail_prefix_len + 16;
+    const auto padded_tail_len = ((tail_message_len + 9 + 63) / 64) * 64;
+    if (padded_tail_len > 128) {
+        throw std::runtime_error("DWC padded tail is too long for CUDA solver");
+    }
+
+    std::array<std::uint8_t, 128> padded{};
+    if (tail_prefix_len > 0) {
+        std::memcpy(padded.data(), prefix + full_prefix_blocks * 64, tail_prefix_len);
+    }
+    padded[tail_message_len] = 0x80;
+    const auto bit_len = static_cast<std::uint64_t>(message_len) * 8;
+    for (std::size_t i = 0; i < 8; ++i) {
+        padded[padded_tail_len - 1 - i] = static_cast<std::uint8_t>((bit_len >> (i * 8)) & 0xff);
+    }
+
+    prepared.block_count = static_cast<std::uint32_t>(padded_tail_len / 64);
+    prepared.nonce_offset = static_cast<std::uint32_t>(tail_prefix_len);
+    for (std::size_t index = 0; index < padded_tail_len / 4; ++index) {
+        const auto offset = index * 4;
+        prepared.template_words[index] = (static_cast<std::uint32_t>(padded[offset]) << 24)
+            | (static_cast<std::uint32_t>(padded[offset + 1]) << 16)
+            | (static_cast<std::uint32_t>(padded[offset + 2]) << 8)
+            | static_cast<std::uint32_t>(padded[offset + 3]);
+    }
+    return prepared;
+}
+
+std::uint64_t dwc_session_batch_attempts(std::uint64_t batch_size,
+                                         std::uint64_t start_nonce,
+                                         const DwcCudaDeviceResult& result) {
+    if (result.found == 0u || result.nonce < start_nonce) {
+        return batch_size;
+    }
+    const auto found_offset = result.nonce - start_nonce;
+    if (found_offset >= batch_size) {
+        return batch_size;
+    }
+    return found_offset + 1;
+}
+
+} // namespace
+
+DwcCudaSession::DwcCudaSession(std::size_t device_index,
+                               const std::uint8_t* prefix,
+                               std::size_t prefix_len,
+                               std::uint32_t difficulty_bits,
+                               std::uint64_t batch_size,
+                               std::uint64_t start_nonce,
+                               std::uint32_t threads_per_block,
+                               std::uint32_t nonces_per_thread,
+                               std::uint32_t max_blocks,
+                               bool early_exit)
+    : device_index_(static_cast<int>(device_index)),
+      prefix_len_(static_cast<std::uint32_t>(prefix_len)),
+      difficulty_bits_(difficulty_bits),
+      early_exit_(early_exit),
+      batch_size_(batch_size),
+      next_nonce_(start_nonce) {
+    if (prefix == nullptr && prefix_len > 0) {
+        throw std::runtime_error("DWC prefix pointer is null");
+    }
+    if (prefix_len > 103) {
+        throw std::runtime_error("DWC prefix is too long for CUDA solver");
+    }
+    if (batch_size == 0) {
+        throw std::runtime_error("DWC CUDA batch size must be greater than zero");
+    }
+    if (batch_size > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::runtime_error("DWC CUDA batch size exceeds kernel grid limit");
+    }
+    if (std::numeric_limits<std::uint64_t>::max() - start_nonce < batch_size) {
+        throw std::runtime_error("DWC CUDA nonce range exhausted");
+    }
+
+    check_cuda(cudaSetDevice(device_index_), "cudaSetDevice failed");
+    cudaDeviceProp properties{};
+    check_cuda(cudaGetDeviceProperties(&properties, device_index_),
+               "cudaGetDeviceProperties failed");
+    threads_per_block_ = threads_per_block == 0 ? 256u : threads_per_block;
+    nonces_per_thread_ = nonces_per_thread == 0 ? 4u : nonces_per_thread;
+    if (nonces_per_thread_ != 1u && nonces_per_thread_ != 2u
+        && nonces_per_thread_ != 4u && nonces_per_thread_ != 8u) {
+        throw std::runtime_error("DWC CUDA nonces_per_thread must be one of 1, 2, 4, or 8");
+    }
+    const auto max_threads_per_block = std::min<std::uint32_t>(
+        512u, static_cast<std::uint32_t>(properties.maxThreadsPerBlock));
+    if (threads_per_block_ == 0 || threads_per_block_ > max_threads_per_block) {
+        throw std::runtime_error("DWC CUDA threads_per_block is out of range");
+    }
+    const auto sm_count = static_cast<std::uint32_t>(std::max(properties.multiProcessorCount, 1));
+    max_blocks_ = max_blocks == 0 ? sm_count * 8u : max_blocks;
+    max_blocks_ = std::max<std::uint32_t>(1u, max_blocks_);
+
+    const auto prepared = build_dwc_prepared_tail(prefix, prefix_len);
+    initial_state_ = prepared.initial_state;
+    template_words_ = prepared.template_words;
+    block_count_ = prepared.block_count;
+    nonce_offset_ = prepared.nonce_offset;
+
+    check_cuda(cudaMalloc(&device_result_, sizeof(DwcCudaDeviceResult)),
+               "cudaMalloc DWC result failed");
+}
+
+DwcCudaSession::~DwcCudaSession() {
+    if (device_result_ != nullptr) {
+        cudaFree(device_result_);
+        device_result_ = nullptr;
+    }
+}
+
+DwcCudaBatchResult DwcCudaSession::mine_next_batch() {
+    if (std::numeric_limits<std::uint64_t>::max() - next_nonce_ < batch_size_) {
+        throw std::runtime_error("DWC CUDA nonce range exhausted");
+    }
+    const auto start_nonce = next_nonce_;
+    check_cuda(cudaSetDevice(device_index_), "cudaSetDevice failed");
+    check_cuda(cudaMemset(device_result_, 0, sizeof(DwcCudaDeviceResult)),
+               "cudaMemset result failed");
+
+    DwcCudaKernelParams params{};
+    params.difficulty_bits = difficulty_bits_;
+    params.block_count = block_count_;
+    params.nonce_offset = nonce_offset_;
+    params.padding = 0;
+    for (std::size_t index = 0; index < initial_state_.size(); ++index) {
+        params.initial_state[index] = initial_state_[index];
+    }
+    for (std::size_t index = 0; index < template_words_.size(); ++index) {
+        params.template_words[index] = template_words_[index];
+    }
+    params.start_nonce = static_cast<unsigned long long>(next_nonce_);
+    params.batch_size = static_cast<unsigned long long>(batch_size_);
+
+    const auto work_per_block = static_cast<std::uint64_t>(threads_per_block_)
+        * static_cast<std::uint64_t>(nonces_per_thread_);
+    const auto needed_blocks = static_cast<std::uint64_t>(
+        (batch_size_ + work_per_block - 1) / work_per_block);
+    const auto launch_blocks = static_cast<unsigned int>(
+        std::max<std::uint64_t>(1, std::min<std::uint64_t>(needed_blocks, max_blocks_)));
+    if (launch_blocks == 0) {
+        throw std::runtime_error("DWC CUDA launch grid is empty");
+    }
+
+    launch_dwc_kernel(launch_blocks,
+                      threads_per_block_,
+                      nonces_per_thread_,
+                      early_exit_,
+                      params,
+                      static_cast<DwcCudaDeviceResult*>(device_result_));
+    check_cuda(cudaGetLastError(), "DWC CUDA kernel launch failed");
+    check_cuda(cudaDeviceSynchronize(), "DWC CUDA kernel execution failed");
+
+    DwcCudaDeviceResult host_result{};
+    check_cuda(cudaMemcpy(&host_result, device_result_, sizeof(host_result),
+                          cudaMemcpyDeviceToHost),
+               "cudaMemcpy result failed");
+
+    const auto batch_attempts = dwc_session_batch_attempts(batch_size_, start_nonce, host_result);
+    const auto max_attempts = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+    attempts_ = attempts_ > max_attempts - batch_attempts ? max_attempts : attempts_ + batch_attempts;
+    next_nonce_ += batch_size_;
+
+    DwcCudaBatchResult result;
+    result.found = host_result.found != 0u;
+    result.nonce = host_result.nonce;
+    result.attempts = static_cast<std::int64_t>(attempts_);
+    if (result.found) {
+        digest_words_to_bytes(host_result.digest_words, result.digest);
+    }
+    return result;
+}
+
 } // namespace app
 
 // ============================================================================

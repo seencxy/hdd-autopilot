@@ -73,7 +73,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut config_fetched = Instant::now();
     let difficulty = args.difficulty.unwrap_or(config.difficulty.max(1));
 
-    let backend_label = if args.cpu_only { "cpu" } else { "metal→cpu" };
+    let backend_label = if args.cpu_only { "cpu" } else { "cuda→metal→cpu" };
     println!(
         "address={address} api={} backend={backend_label} difficulty={difficulty} submit={}",
         args.api_base, args.submit
@@ -127,8 +127,9 @@ fn run() -> Result<(), Box<dyn Error>> {
             cpu_threads: args.threads,
             prefer_gpu: !args.cpu_only,
             allow_cpu_fallback: true,
-            metal_device_index: args.device,
+            gpu_device_index: args.device,
             metal_batch_size: args.batch,
+            ..DwcMineConfig::default()
         };
 
         let share = if args.cpu_only {
@@ -159,6 +160,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         shares_found += 1;
         total_attempts = total_attempts.saturating_add(share.attempts);
         let backend = match share.backend {
+            DwcBackend::Cuda => "cuda",
             DwcBackend::Metal => "metal",
             DwcBackend::Cpu => "cpu",
         };

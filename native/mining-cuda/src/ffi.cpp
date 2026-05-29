@@ -133,6 +133,18 @@ void fill_rpow2_mine_result(const app::Rpow2CudaBatchResult& mined,
     }
 }
 
+void fill_dwc_mine_result(const app::DwcCudaBatchResult& mined,
+                          mining_cuda_dwc_mine_result* result) {
+    result->found = mined.found;
+    result->nonce = mined.nonce;
+    result->attempts = mined.attempts;
+    std::fill(std::begin(result->digest_hex), std::end(result->digest_hex), '\0');
+    if (mined.found) {
+        const auto digest = app::hex_encode(mined.digest.data(), mined.digest.size());
+        std::strncpy(result->digest_hex, digest.c_str(), sizeof(result->digest_hex) - 1);
+    }
+}
+
 void fill_h98hash_mine_result(const app::H98HashCudaBatchResult& mined,
                               mining_cuda_h98hash_mine_result* result) {
     result->found = mined.found;
@@ -263,6 +275,26 @@ struct mining_cuda_h256hash_session {
     }
 };
 
+struct mining_cuda_dwc_session {
+    app::DwcCudaSession session;
+
+    mining_cuda_dwc_session(std::size_t device_index,
+                            const mining_cuda_dwc_job& job,
+                            const mining_cuda_dwc_solver_config& config,
+                            std::uint64_t start_nonce)
+        : session(device_index,
+                  job.prefix_ptr,
+                  job.prefix_len,
+                  job.difficulty_bits,
+                  config.batch_size,
+                  start_nonce,
+                  config.threads_per_block,
+                  config.nonces_per_thread,
+                  config.max_blocks,
+                  config.early_exit) {
+    }
+};
+
 bool mining_cuda_is_available() {
     try {
         clear_last_error();
@@ -273,6 +305,50 @@ bool mining_cuda_is_available() {
         set_last_error(error);
         return false;
     }
+}
+
+bool mining_cuda_dwc_is_available() {
+    return mining_cuda_is_available();
+}
+
+mining_cuda_dwc_session* mining_cuda_dwc_session_create(
+    std::size_t device_index,
+    const mining_cuda_dwc_job* job,
+    const mining_cuda_dwc_solver_config* config,
+    std::uint64_t start_nonce) {
+    if (job == nullptr || config == nullptr) {
+        g_last_error = "dwc session_create parameter is null";
+        return nullptr;
+    }
+    try {
+        clear_last_error();
+        return new mining_cuda_dwc_session(device_index, *job, *config, start_nonce);
+    } catch (const std::exception& error) {
+        set_last_error(error);
+        return nullptr;
+    }
+}
+
+bool mining_cuda_dwc_session_mine_next_batch(
+    mining_cuda_dwc_session* session,
+    mining_cuda_dwc_mine_result* result) {
+    if (session == nullptr || result == nullptr) {
+        g_last_error = "dwc session_mine_next_batch parameter is null";
+        return false;
+    }
+    try {
+        clear_last_error();
+        const auto mined = session->session.mine_next_batch();
+        fill_dwc_mine_result(mined, result);
+        return true;
+    } catch (const std::exception& error) {
+        set_last_error(error);
+        return false;
+    }
+}
+
+void mining_cuda_dwc_session_destroy(mining_cuda_dwc_session* session) {
+    delete session;
 }
 
 bool mining_cuda_validate() {
