@@ -31,6 +31,8 @@ use time as _;
 use tokio as _;
 use unicode_width as _;
 use url as _;
+#[cfg(not(target_os = "macos"))]
+use iana_time_zone as _;
 
 use rand::RngCore;
 
@@ -61,6 +63,10 @@ fn run() -> Result<(), Box<dyn Error>> {
     if !(address.starts_with("0x") && address.len() == 42) {
         return Err("--address must be a 0x-prefixed 40-hex-char Ethereum address".into());
     }
+    // The server normalizes the miner address to lowercase before hashing
+    // sha256("address|epoch|nonce"), so a checksummed (mixed-case) address
+    // would mine shares the server rejects with "Hash does not meet difficulty".
+    let address = address.to_lowercase();
 
     let client = DwcClient::with_base(&args.api_base)?;
     let mut config = client.config()?;
@@ -170,10 +176,18 @@ fn run() -> Result<(), Box<dyn Error>> {
                 Ok(body) => {
                     shares_submitted += 1;
                     last_submit = Instant::now();
+                    let remaining = body.get("dailyAddrRemaining").and_then(|v| v.as_i64());
                     println!(
                         "share #{shares_found} accepted nonce={} hash={} [{backend}] resp={}",
                         share.nonce, share.digest_hex, body
                     );
+                    // The server enforces a per-address daily share cap
+                    // (dailyAddrCap, currently 200). Stop once it's exhausted
+                    // instead of spamming rejected submits.
+                    if remaining == Some(0) {
+                        println!("daily per-address share cap reached — stopping.");
+                        break;
+                    }
                 }
                 Err(error) => {
                     eprintln!("submit failed for nonce={}: {error}", share.nonce);
