@@ -81,12 +81,37 @@ pub struct mining_metal_rpow2_mine_result {
 }
 
 #[repr(C)]
+pub struct mining_metal_dwc_solver_config {
+    pub batch_size: u64,
+}
+
+#[repr(C)]
+pub struct mining_metal_dwc_job {
+    pub prefix_ptr: *const u8,
+    pub prefix_len: usize,
+    pub difficulty_bits: u32,
+}
+
+#[repr(C)]
+pub struct mining_metal_dwc_mine_result {
+    pub found: bool,
+    pub nonce: u64,
+    pub attempts: i64,
+    pub digest_hex: [u8; 65],
+}
+
+#[repr(C)]
 pub struct mining_metal_session {
     _private: [u8; 0],
 }
 
 #[repr(C)]
 pub struct mining_metal_rpow2_session {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct mining_metal_dwc_session {
     _private: [u8; 0],
 }
 
@@ -156,6 +181,29 @@ pub struct Rpow2MetalMineResult {
     pub digest_hex: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DwcMetalSolverConfig {
+    pub batch_size: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DwcMetalJob<'a> {
+    pub prefix: &'a [u8],
+    pub difficulty_bits: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DwcMetalMineResult {
+    pub found: bool,
+    pub nonce: u64,
+    pub attempts: i64,
+    pub digest_hex: String,
+}
+
+pub struct DwcMetalMiningSession {
+    raw: *mut mining_metal_dwc_session,
+}
+
 pub struct MetalMiningSession {
     raw: *mut mining_metal_session,
 }
@@ -219,6 +267,18 @@ unsafe extern "C" {
         result: *mut mining_metal_rpow2_mine_result,
     ) -> bool;
     fn mining_metal_rpow2_session_destroy(session: *mut mining_metal_rpow2_session);
+    fn mining_metal_dwc_is_available() -> bool;
+    fn mining_metal_dwc_session_create(
+        device_index: usize,
+        job: *const mining_metal_dwc_job,
+        config: *const mining_metal_dwc_solver_config,
+        start_nonce: u64,
+    ) -> *mut mining_metal_dwc_session;
+    fn mining_metal_dwc_session_mine_next_batch(
+        session: *mut mining_metal_dwc_session,
+        result: *mut mining_metal_dwc_mine_result,
+    ) -> bool;
+    fn mining_metal_dwc_session_destroy(session: *mut mining_metal_dwc_session);
 }
 
 pub fn is_available() -> Result<bool, String> {
@@ -548,6 +608,90 @@ pub fn create_session(
     }
 }
 
+pub fn dwc_is_available() -> Result<bool, String> {
+    #[cfg(not(all(target_os = "macos", mining_metal_native_enabled)))]
+    {
+        Ok(false)
+    }
+    #[cfg(all(target_os = "macos", mining_metal_native_enabled))]
+    unsafe {
+        if mining_metal_dwc_is_available() {
+            Ok(true)
+        } else {
+            let message = last_error_message_if_any();
+            if message.is_empty() {
+                Ok(false)
+            } else {
+                Err(message)
+            }
+        }
+    }
+}
+
+pub fn dwc_create_session(
+    device_index: usize,
+    job: &DwcMetalJob<'_>,
+    config: DwcMetalSolverConfig,
+    start_nonce: u64,
+) -> Result<DwcMetalMiningSession, String> {
+    #[cfg(not(all(target_os = "macos", mining_metal_native_enabled)))]
+    {
+        let _ = (device_index, job, config, start_nonce);
+        Err("当前平台未启用 Metal 后端".to_string())
+    }
+    #[cfg(all(target_os = "macos", mining_metal_native_enabled))]
+    unsafe {
+        let raw_job = mining_metal_dwc_job {
+            prefix_ptr: job.prefix.as_ptr(),
+            prefix_len: job.prefix.len(),
+            difficulty_bits: job.difficulty_bits,
+        };
+        let raw_config = mining_metal_dwc_solver_config {
+            batch_size: config.batch_size,
+        };
+        let raw = mining_metal_dwc_session_create(device_index, &raw_job, &raw_config, start_nonce);
+        if raw.is_null() {
+            Err(last_error_message())
+        } else {
+            Ok(DwcMetalMiningSession { raw })
+        }
+    }
+}
+
+impl DwcMetalMiningSession {
+    pub fn mine_next_batch(&mut self) -> Result<DwcMetalMineResult, String> {
+        #[cfg(not(all(target_os = "macos", mining_metal_native_enabled)))]
+        {
+            Err("当前平台未启用 Metal 后端".to_string())
+        }
+        #[cfg(all(target_os = "macos", mining_metal_native_enabled))]
+        unsafe {
+            let mut raw_result = mining_metal_dwc_mine_result {
+                found: false,
+                nonce: 0,
+                attempts: 0,
+                digest_hex: [0; 65],
+            };
+            if !mining_metal_dwc_session_mine_next_batch(self.raw, &mut raw_result) {
+                return Err(last_error_message());
+            }
+            Ok(to_dwc_mine_result(raw_result))
+        }
+    }
+}
+
+impl Drop for DwcMetalMiningSession {
+    fn drop(&mut self) {
+        #[cfg(all(target_os = "macos", mining_metal_native_enabled))]
+        unsafe {
+            if !self.raw.is_null() {
+                mining_metal_dwc_session_destroy(self.raw);
+                self.raw = std::ptr::null_mut();
+            }
+        }
+    }
+}
+
 impl MetalMiningSession {
     pub fn mine_next_batch(&mut self) -> Result<MetalMineResult, String> {
         #[cfg(not(all(target_os = "macos", mining_metal_native_enabled)))]
@@ -650,6 +794,22 @@ fn to_rpow2_mine_result(raw_result: mining_metal_rpow2_mine_result) -> Rpow2Meta
         .unwrap_or(raw_result.digest_hex.len());
     let digest_hex = String::from_utf8_lossy(&raw_result.digest_hex[..digest_len]).to_string();
     Rpow2MetalMineResult {
+        found: raw_result.found,
+        nonce: raw_result.nonce,
+        attempts: raw_result.attempts,
+        digest_hex,
+    }
+}
+
+#[cfg(all(target_os = "macos", mining_metal_native_enabled))]
+fn to_dwc_mine_result(raw_result: mining_metal_dwc_mine_result) -> DwcMetalMineResult {
+    let digest_len = raw_result
+        .digest_hex
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(raw_result.digest_hex.len());
+    let digest_hex = String::from_utf8_lossy(&raw_result.digest_hex[..digest_len]).to_string();
+    DwcMetalMineResult {
         found: raw_result.found,
         nonce: raw_result.nonce,
         attempts: raw_result.attempts,

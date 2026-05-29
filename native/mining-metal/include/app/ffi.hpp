@@ -28,6 +28,7 @@ struct mining_metal_job {
 
 struct mining_metal_session;
 struct mining_metal_rpow2_session;
+struct mining_metal_dwc_session;
 
 struct mining_metal_benchmark_result {
     std::size_t batch_size;
@@ -118,3 +119,34 @@ MINING_METAL_EXPORT bool mining_metal_rpow2_session_mine_next_batch(
     mining_metal_rpow2_session* session,
     mining_metal_rpow2_mine_result* result);
 MINING_METAL_EXPORT void mining_metal_rpow2_session_destroy(mining_metal_rpow2_session* session);
+
+// DigitalWaterCoin (DWC): sha256("{address}|{epoch}|{salt}" + 16-hex counter),
+// difficulty measured in *leading* zero bits. `prefix_ptr` holds the constant
+// "address|epoch|salt" ASCII bytes; the kernel appends the 16-hex counter.
+struct mining_metal_dwc_solver_config {
+    std::uint64_t batch_size;
+};
+
+struct mining_metal_dwc_job {
+    const std::uint8_t* prefix_ptr;
+    std::size_t prefix_len;
+    std::uint32_t difficulty_bits;
+};
+
+struct mining_metal_dwc_mine_result {
+    bool found;
+    std::uint64_t nonce;
+    std::int64_t attempts;
+    char digest_hex[65];
+};
+
+MINING_METAL_EXPORT bool mining_metal_dwc_is_available();
+MINING_METAL_EXPORT mining_metal_dwc_session* mining_metal_dwc_session_create(
+    std::size_t device_index,
+    const mining_metal_dwc_job* job,
+    const mining_metal_dwc_solver_config* config,
+    std::uint64_t start_nonce);
+MINING_METAL_EXPORT bool mining_metal_dwc_session_mine_next_batch(
+    mining_metal_dwc_session* session,
+    mining_metal_dwc_mine_result* result);
+MINING_METAL_EXPORT void mining_metal_dwc_session_destroy(mining_metal_dwc_session* session);

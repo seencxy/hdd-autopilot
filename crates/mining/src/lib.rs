@@ -1,6 +1,7 @@
 mod backend;
 mod client;
 mod config;
+pub mod dwc;
 mod error;
 mod gpu;
 pub mod h256hash;
