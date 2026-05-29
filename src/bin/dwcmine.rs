@@ -432,12 +432,15 @@ fn run_multi(args: &Args) -> Result<(), Box<dyn Error>> {
                     // 429 is per-IP, not per-address, so it never rotates the
                     // address. Only persistent network failures do.
                     const ROTATE_AFTER_NETERR: u32 = 10;
-                    loop {
+                    'addr: loop {
                         if cancel.load(Ordering::SeqCst) {
                             break;
                         }
-                        let epoch = ((current_epoch() as i64) + epoch_offset).to_string();
-                        let job = DwcJob::new(&wallet.address, &epoch, &salt, difficulty);
+                        if addr_shares >= MAX_SHARES_PER_ADDRESS {
+                            break;
+                        }
+                        let mine_epoch = ((current_epoch() as i64) + epoch_offset).to_string();
+                        let job = DwcJob::new(&wallet.address, &mine_epoch, &salt, difficulty);
                         let mine_config = DwcMineConfig {
                             start_counter: counter,
                             counter_count: u64::MAX - counter,
@@ -459,68 +462,79 @@ fn run_multi(args: &Args) -> Result<(), Box<dyn Error>> {
                             }
                             continue;
                         }
-                        match client.submit(&wallet.address, &epoch, &share.nonce) {
-                            Ok(body) => {
-                                consec_neterr = 0;
-                                addr_submitted += 1;
-                                total_submitted.fetch_add(1, Ordering::Relaxed);
-                                if body.get("dailyAddrRemaining").and_then(|v| v.as_i64())
-                                    == Some(0)
-                                {
-                                    println!(
-                                        "[wallet #{}] {} — full ({} submitted today), creating next",
-                                        existing + n,
-                                        wallet.address,
-                                        addr_submitted
-                                    );
-                                    break;
-                                }
-                                if pace > 0 {
-                                    std::thread::sleep(Duration::from_millis(pace));
-                                }
+                        // Submit THIS share, retrying the SAME nonce on rate
+                        // limits / transient errors (so `found` stays ~= submitted)
+                        // until it's accepted, the epoch rolls over (nonce goes
+                        // stale -> re-mine), or we give up the address.
+                        loop {
+                            if cancel.load(Ordering::SeqCst) {
+                                break 'addr;
                             }
-                            Err(error) => {
-                                let msg = error.to_string();
-                                let rate_limited = msg.contains("429")
-                                    || msg.contains("too fast")
-                                    || msg.contains("slow down");
-                                if rate_limited {
-                                    // Per-IP rate limit — NOT this address being
-                                    // full. Keep the address; wait the server's
-                                    // requested time (or retry quickly via a
-                                    // different proxy IP) and try again.
+                            // A rotated epoch makes this nonce stale: re-mine.
+                            if ((current_epoch() as i64) + epoch_offset).to_string() != mine_epoch {
+                                break;
+                            }
+                            match client.submit(&wallet.address, &mine_epoch, &share.nonce) {
+                                Ok(body) => {
                                     consec_neterr = 0;
-                                    let wait_ms = if proxied {
-                                        750
-                                    } else {
-                                        parse_wait_ms(&msg).unwrap_or(pace.max(1000))
-                                    };
-                                    std::thread::sleep(Duration::from_millis(wait_ms));
-                                } else {
-                                    // Transient network/proxy error: retry, do
-                                    // NOT burn this address. Surface the reason.
-                                    consec_neterr += 1;
-                                    if consec_neterr == 1 || consec_neterr % 10 == 0 {
-                                        let short: String = msg.chars().take(120).collect();
-                                        eprintln!(
-                                            "[wallet #{}] submit error ({}x): {}",
-                                            existing + n, consec_neterr, short
-                                        );
-                                    }
-                                    if consec_neterr >= ROTATE_AFTER_NETERR {
+                                    addr_submitted += 1;
+                                    total_submitted.fetch_add(1, Ordering::Relaxed);
+                                    if body.get("dailyAddrRemaining").and_then(|v| v.as_i64())
+                                        == Some(0)
+                                    {
                                         println!(
-                                            "[wallet #{}] {} — submit failing persistently (check proxies/network), creating next",
-                                            existing + n, wallet.address
+                                            "[wallet #{}] {} — full ({} submitted today), creating next",
+                                            existing + n,
+                                            wallet.address,
+                                            addr_submitted
                                         );
-                                        break;
+                                        break 'addr;
                                     }
-                                    let backoff = 100u64.saturating_mul(consec_neterr as u64).min(2000);
-                                    std::thread::sleep(Duration::from_millis(backoff));
+                                    if pace > 0 {
+                                        std::thread::sleep(Duration::from_millis(pace));
+                                    }
+                                    break; // accepted -> mine the next share
+                                }
+                                Err(error) => {
+                                    let msg = error.to_string();
+                                    let rate_limited = msg.contains("429")
+                                        || msg.contains("too fast")
+                                        || msg.contains("slow down");
+                                    if rate_limited {
+                                        // Per-IP limit, not address-full: wait the
+                                        // server's time and retry the SAME nonce
+                                        // (or hop to another proxy IP).
+                                        consec_neterr = 0;
+                                        let wait_ms = if proxied {
+                                            750
+                                        } else {
+                                            parse_wait_ms(&msg).unwrap_or(pace.max(1000))
+                                        };
+                                        std::thread::sleep(Duration::from_millis(wait_ms));
+                                    } else {
+                                        // Transient network/proxy error: retry the
+                                        // same nonce; only abandon after many.
+                                        consec_neterr += 1;
+                                        if consec_neterr == 1 || consec_neterr % 10 == 0 {
+                                            let short: String = msg.chars().take(120).collect();
+                                            eprintln!(
+                                                "[wallet #{}] submit error ({}x): {}",
+                                                existing + n, consec_neterr, short
+                                            );
+                                        }
+                                        if consec_neterr >= ROTATE_AFTER_NETERR {
+                                            println!(
+                                                "[wallet #{}] {} — submit failing persistently (check proxies/network), creating next",
+                                                existing + n, wallet.address
+                                            );
+                                            break 'addr;
+                                        }
+                                        let backoff =
+                                            100u64.saturating_mul(consec_neterr as u64).min(2000);
+                                        std::thread::sleep(Duration::from_millis(backoff));
+                                    }
                                 }
                             }
-                        }
-                        if addr_shares >= MAX_SHARES_PER_ADDRESS {
-                            break;
                         }
                     }
                     active.fetch_sub(1, Ordering::Relaxed);
