@@ -329,6 +329,11 @@ fn run_multi(args: &Args) -> Result<(), Box<dyn Error>> {
     if !args.submit {
         println!("(dry run — shares verified locally but NOT submitted; pass --submit to credit them)");
     }
+    if args.submit && client.proxy_count() == 0 {
+        println!(
+            "note: the server rate-limits ~1 share / 12s PER IP. With no proxies you're capped near 5 shares/min regardless of --concurrency; add working proxies (many IPs) to scale."
+        );
+    }
 
     let book = Arc::new(Mutex::new(WalletBook {
         path: args.wallets.clone(),
@@ -379,7 +384,17 @@ fn run_multi(args: &Args) -> Result<(), Box<dyn Error>> {
             let created_count = Arc::clone(&created_count);
             let submit = args.submit;
             let prefer_gpu = args.gpu;
-            let min_interval = args.min_submit_interval_ms;
+            let proxied = client.proxy_count() > 0;
+            // The server rate-limits per IP (~1 accepted share / 12s). With one
+            // IP we must pace; with a proxy pool each submit uses a random IP so
+            // we don't pace proactively and just retry elsewhere on a 429.
+            let pace = if args.min_submit_interval_ms > 0 {
+                args.min_submit_interval_ms
+            } else if proxied {
+                0
+            } else {
+                12_000
+            };
             std::thread::spawn(move || {
                 let mut rng = rand::rng();
                 loop {
@@ -409,17 +424,13 @@ fn run_multi(args: &Args) -> Result<(), Box<dyn Error>> {
 
                     let salt = random_salt(&mut rng);
                     let mut counter = 0u64;
-                    let mut consec_429 = 0u32;
                     let mut consec_neterr = 0u32;
                     let mut addr_shares = 0u64;
                     let mut addr_submitted = 0u64;
                     // Safety bound if a submit response ever omits the cap field.
                     const MAX_SHARES_PER_ADDRESS: u64 = 1000;
-                    // Only give up an address after the daily cap, or after
-                    // *repeated* rate-limits / network failures — never on a
-                    // single transient proxy error (that would burn a wallet
-                    // that still has capacity).
-                    const ROTATE_AFTER_429: u32 = 6;
+                    // 429 is per-IP, not per-address, so it never rotates the
+                    // address. Only persistent network failures do.
                     const ROTATE_AFTER_NETERR: u32 = 10;
                     loop {
                         if cancel.load(Ordering::SeqCst) {
@@ -450,7 +461,6 @@ fn run_multi(args: &Args) -> Result<(), Box<dyn Error>> {
                         }
                         match client.submit(&wallet.address, &epoch, &share.nonce) {
                             Ok(body) => {
-                                consec_429 = 0;
                                 consec_neterr = 0;
                                 addr_submitted += 1;
                                 total_submitted.fetch_add(1, Ordering::Relaxed);
@@ -465,27 +475,27 @@ fn run_multi(args: &Args) -> Result<(), Box<dyn Error>> {
                                     );
                                     break;
                                 }
-                                if min_interval > 0 {
-                                    std::thread::sleep(Duration::from_millis(min_interval));
+                                if pace > 0 {
+                                    std::thread::sleep(Duration::from_millis(pace));
                                 }
                             }
                             Err(error) => {
                                 let msg = error.to_string();
-                                let rate_limited = msg.contains("429");
+                                let rate_limited = msg.contains("429")
+                                    || msg.contains("too fast")
+                                    || msg.contains("slow down");
                                 if rate_limited {
-                                    // Per-address rate limit: back off and retry
-                                    // the SAME address; only rotate if it keeps
-                                    // happening (likely genuinely exhausted).
-                                    consec_429 += 1;
-                                    if consec_429 >= ROTATE_AFTER_429 {
-                                        println!(
-                                            "[wallet #{}] {} — repeatedly rate-limited (429), creating next",
-                                            existing + n, wallet.address
-                                        );
-                                        break;
-                                    }
-                                    let backoff = 200u64.saturating_mul(consec_429 as u64).min(3000);
-                                    std::thread::sleep(Duration::from_millis(backoff));
+                                    // Per-IP rate limit — NOT this address being
+                                    // full. Keep the address; wait the server's
+                                    // requested time (or retry quickly via a
+                                    // different proxy IP) and try again.
+                                    consec_neterr = 0;
+                                    let wait_ms = if proxied {
+                                        750
+                                    } else {
+                                        parse_wait_ms(&msg).unwrap_or(pace.max(1000))
+                                    };
+                                    std::thread::sleep(Duration::from_millis(wait_ms));
                                 } else {
                                     // Transient network/proxy error: retry, do
                                     // NOT burn this address. Surface the reason.
@@ -499,7 +509,7 @@ fn run_multi(args: &Args) -> Result<(), Box<dyn Error>> {
                                     }
                                     if consec_neterr >= ROTATE_AFTER_NETERR {
                                         println!(
-                                            "[wallet #{}] {} — submit failing persistently (check proxies), creating next",
+                                            "[wallet #{}] {} — submit failing persistently (check proxies/network), creating next",
                                             existing + n, wallet.address
                                         );
                                         break;
@@ -553,6 +563,15 @@ impl WalletBook {
         self.created += 1;
         Ok((wallet, self.created))
     }
+}
+
+/// Parse the seconds from a server message like "… wait 12s before next share"
+/// into milliseconds (+0.5s slack).
+fn parse_wait_ms(msg: &str) -> Option<u64> {
+    let start = msg.find("wait ")? + "wait ".len();
+    let digits: String = msg[start..].chars().take_while(|c| c.is_ascii_digit()).collect();
+    let secs: u64 = digits.parse().ok()?;
+    Some(secs.saturating_mul(1000).saturating_add(500))
 }
 
 fn random_salt(rng: &mut impl RngCore) -> String {
