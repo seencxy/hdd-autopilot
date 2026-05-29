@@ -12,7 +12,7 @@
 use std::env;
 use std::error::Error;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use mining::dwc::{
@@ -57,6 +57,16 @@ fn run() -> Result<(), Box<dyn Error>> {
         print_usage();
         return Ok(());
     }
+    // A single explicit --address keeps the original single-wallet loop;
+    // otherwise run the multi-address worker pool.
+    if args.address.is_some() {
+        run_single(&args)
+    } else {
+        run_multi(&args)
+    }
+}
+
+fn run_single(args: &Args) -> Result<(), Box<dyn Error>> {
     let address = args.address.clone().ok_or(
         "missing --address 0x...; your wallet address is your miner ID",
     )?;
@@ -259,6 +269,203 @@ fn run() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Multi-address mode: generate/load many wallets and mine them concurrently.
+/// Each worker thread owns one address at a time, mines+submits shares for it,
+/// and rotates to the next address as soon as that one is full (daily cap) or
+/// rate-limited (429). Mining only one share at a time per worker means no
+/// hash power is spent on shares that can't be submitted.
+fn run_multi(args: &Args) -> Result<(), Box<dyn Error>> {
+    let wallets = mining::dwc::load_or_create_wallets(&args.wallets, args.addresses)?;
+    let addresses: Vec<String> = wallets.iter().map(|w| w.address.clone()).collect();
+    if addresses.is_empty() {
+        return Err("no wallets available; set --addresses N (> 0)".into());
+    }
+
+    let proxies = match &args.proxies {
+        Some(path) => mining::dwc::load_proxy_file(path)?,
+        None => Vec::new(),
+    };
+    if args.proxies.is_some() && proxies.is_empty() {
+        return Err("--proxies file had no usable proxy lines".into());
+    }
+    let client = Arc::new(DwcClient::with_base_and_proxies(&args.api_base, &proxies)?);
+
+    let config = client.config()?;
+    let difficulty = args.difficulty.unwrap_or(config.difficulty.max(1));
+    // Align to the server's epoch counter despite any local clock skew.
+    let server_epoch: i64 = config
+        .epoch
+        .parse()
+        .unwrap_or_else(|_| current_epoch() as i64);
+    let epoch_offset: i64 = server_epoch - current_epoch() as i64;
+
+    println!(
+        "multi-address mode: wallets={} (file {}), concurrency={}, difficulty={}, submit={}, proxies={}",
+        addresses.len(),
+        args.wallets,
+        args.concurrency,
+        difficulty,
+        args.submit,
+        client.proxy_count()
+    );
+    println!(
+        "⚠ private keys are stored in {} — keep it safe and backed up; it's the only way to spend mined DWC.",
+        args.wallets
+    );
+    println!("mining backend: {}", if args.gpu { "gpu (shared)" } else { "cpu (1 thread/worker)" });
+    if !args.submit {
+        println!("(dry run — shares verified locally but NOT submitted; pass --submit to credit them)");
+    }
+
+    let addresses = Arc::new(addresses);
+    let claim = Arc::new(AtomicUsize::new(0));
+    let cancel = Arc::new(AtomicBool::new(false));
+    let total_found = Arc::new(AtomicU64::new(0));
+    let total_submitted = Arc::new(AtomicU64::new(0));
+    let addrs_done = Arc::new(AtomicU64::new(0));
+    let run_start = Instant::now();
+
+    let reporter = {
+        let total_found = Arc::clone(&total_found);
+        let total_submitted = Arc::clone(&total_submitted);
+        let addrs_done = Arc::clone(&addrs_done);
+        let cancel = Arc::clone(&cancel);
+        let total_addrs = addresses.len();
+        std::thread::spawn(move || {
+            while !cancel.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_secs(5));
+                if cancel.load(Ordering::SeqCst) {
+                    break;
+                }
+                let secs = run_start.elapsed().as_secs_f64().max(0.001);
+                let submitted = total_submitted.load(Ordering::Relaxed);
+                println!(
+                    "[stats] addrs_done={}/{} found={} submitted={} rate={:.1} shares/s elapsed={:.0}s",
+                    addrs_done.load(Ordering::Relaxed),
+                    total_addrs,
+                    total_found.load(Ordering::Relaxed),
+                    submitted,
+                    submitted as f64 / secs,
+                    secs
+                );
+            }
+        })
+    };
+
+    let handles: Vec<_> = (0..args.concurrency.max(1))
+        .map(|_| {
+            let client = Arc::clone(&client);
+            let addresses = Arc::clone(&addresses);
+            let claim = Arc::clone(&claim);
+            let cancel = Arc::clone(&cancel);
+            let total_found = Arc::clone(&total_found);
+            let total_submitted = Arc::clone(&total_submitted);
+            let addrs_done = Arc::clone(&addrs_done);
+            let submit = args.submit;
+            let prefer_gpu = args.gpu;
+            let min_interval = args.min_submit_interval_ms;
+            std::thread::spawn(move || {
+                let mut rng = rand::rng();
+                loop {
+                    if cancel.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let idx = claim.fetch_add(1, Ordering::Relaxed);
+                    if idx >= addresses.len() {
+                        break;
+                    }
+                    let address = addresses[idx].clone();
+                    let salt = random_salt(&mut rng);
+                    let mut counter = 0u64;
+                    let mut errors = 0u32;
+                    let mut addr_shares = 0u64;
+                    // Safety bound in case a submit response ever omits the
+                    // remaining-cap field, so we never mine one address forever.
+                    const MAX_SHARES_PER_ADDRESS: u64 = 1000;
+                    loop {
+                        if cancel.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        let epoch = ((current_epoch() as i64) + epoch_offset).to_string();
+                        let job = DwcJob::new(&address, &epoch, &salt, difficulty);
+                        let mine_config = DwcMineConfig {
+                            start_counter: counter,
+                            counter_count: u64::MAX - counter,
+                            cpu_threads: 1,
+                            prefer_gpu,
+                            allow_cpu_fallback: true,
+                            ..DwcMineConfig::default()
+                        };
+                        let share = match mine_dwc(&job, mine_config, &cancel) {
+                            Ok(share) => share,
+                            Err(_) => break,
+                        };
+                        counter = share.counter.wrapping_add(1);
+                        addr_shares += 1;
+                        total_found.fetch_add(1, Ordering::Relaxed);
+                        if !submit {
+                            // Dry run: prove a few shares per address, then rotate.
+                            if addr_shares >= 3 {
+                                break;
+                            }
+                            continue;
+                        }
+                        match client.submit(&address, &epoch, &share.nonce) {
+                            Ok(body) => {
+                                errors = 0;
+                                total_submitted.fetch_add(1, Ordering::Relaxed);
+                                if body.get("dailyAddrRemaining").and_then(|v| v.as_i64())
+                                    == Some(0)
+                                {
+                                    break; // address full → next
+                                }
+                            }
+                            Err(error) => {
+                                errors += 1;
+                                let msg = error.to_string();
+                                // 429 / cap / repeated failure → give up this address.
+                                if msg.contains("429") || msg.contains("limit") || errors >= 3 {
+                                    break;
+                                }
+                            }
+                        }
+                        if addr_shares >= MAX_SHARES_PER_ADDRESS {
+                            break;
+                        }
+                        if min_interval > 0 {
+                            std::thread::sleep(Duration::from_millis(min_interval));
+                        }
+                    }
+                    addrs_done.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+        })
+        .collect();
+
+    for handle in handles {
+        let _ = handle.join();
+    }
+    cancel.store(true, Ordering::SeqCst);
+    let _ = reporter.join();
+
+    let secs = run_start.elapsed().as_secs_f64().max(0.001);
+    let submitted = total_submitted.load(Ordering::Relaxed);
+    println!(
+        "done: addresses={} found={} submitted={} rate={:.1} shares/s elapsed={:.0}s",
+        addresses.len(),
+        total_found.load(Ordering::Relaxed),
+        submitted,
+        submitted as f64 / secs,
+        secs
+    );
+    if args.submit {
+        println!(
+            "all addresses processed; raise --addresses or run again tomorrow for more (daily cap is per address)."
+        );
+    }
+    Ok(())
+}
+
 fn random_salt(rng: &mut impl RngCore) -> String {
     // 8 random bytes → 16 hex chars of session salt.
     let mut bytes = [0u8; 8];
@@ -289,6 +496,10 @@ struct Args {
     max_shares: Option<u64>,
     min_submit_interval_ms: u64,
     proxies: Option<String>,
+    wallets: String,
+    addresses: usize,
+    concurrency: usize,
+    gpu: bool,
 }
 
 impl Default for Args {
@@ -308,6 +519,10 @@ impl Default for Args {
             max_shares: None,
             min_submit_interval_ms: 0,
             proxies: None,
+            wallets: "dwc-wallets.json".to_string(),
+            addresses: 100,
+            concurrency: 16,
+            gpu: false,
         }
     }
 }
@@ -344,6 +559,16 @@ impl Args {
                 "--proxies" | "--proxy-file" => {
                     args.proxies = Some(next(&raw, &mut index, "--proxies")?.to_string())
                 }
+                "--wallets" | "--wallets-file" => {
+                    args.wallets = next(&raw, &mut index, "--wallets")?.to_string()
+                }
+                "--addresses" | "--wallet-count" => {
+                    args.addresses = parse_usize(next(&raw, &mut index, "--addresses")?)?
+                }
+                "--concurrency" | "--workers" => {
+                    args.concurrency = parse_usize(next(&raw, &mut index, "--concurrency")?)?
+                }
+                "--gpu" => args.gpu = true,
                 unknown => return Err(format!("unknown argument: {unknown}").into()),
             }
             index += 1;
@@ -378,15 +603,25 @@ fn parse_usize(value: &str) -> Result<usize, Box<dyn Error>> {
 fn print_usage() {
     println!(
         r#"Usage:
-  cargo run --release --bin dwcmine -- --address 0x<wallet> [options]
+  Multi-address (default): cargo run --release --bin dwcmine -- --submit [--addresses N]
+  Single-address:          cargo run --release --bin dwcmine -- --address 0x<wallet> [options]
 
 Mines DigitalWaterCoin shares: sha256("address|epoch|nonce") with <difficulty>
-leading hex zeros. Uses the Metal GPU when available, else all CPU cores.
+leading hex zeros. The daily share cap and 429 rate-limit are PER ADDRESS, so
+multi-address mode farms many auto-generated wallets concurrently, rotating to
+the next address as soon as one is full.
 
-Required:
-  --address 0x...          your wallet (also your miner ID)
+Multi-address options (used when --address is omitted):
+  --wallets FILE           wallet store JSON (default dwc-wallets.json); private
+                           keys saved here — keep it safe to spend mined DWC
+  --addresses N            ensure at least N wallets exist (default 100)
+  --concurrency N          worker threads / addresses mined at once (default 16)
+  --gpu                    mine on the GPU (shared); default is CPU 1-thread/worker
 
-Options:
+Single-address options:
+  --address 0x...          mine one specific wallet (also your miner ID)
+
+Common options:
   --submit                 actually POST shares to /mine/submit (default: dry run)
   --difficulty N           override difficulty (default: server config, currently 5)
   --cpu                    disable GPU; use CPU workers only

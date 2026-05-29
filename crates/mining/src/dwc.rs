@@ -22,8 +22,9 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rand::Rng;
-use serde::Deserialize;
+use ethers_signers::{LocalWallet, Signer};
+use rand::{Rng, RngCore};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::MiningError;
@@ -540,6 +541,60 @@ pub fn load_proxy_file(path: impl AsRef<std::path::Path>) -> Result<Vec<String>,
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .map(str::to_string)
         .collect())
+}
+
+// ---------------------------------------------------------------------------
+// Wallet management — generate real Ethereum keypairs so mined DWC is spendable.
+// ---------------------------------------------------------------------------
+
+/// A generated mining wallet. `private_key` is kept so the owner can later
+/// import the address and spend any DWC paid to it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DwcWallet {
+    pub address: String,
+    pub private_key: String,
+}
+
+/// Generate a fresh random secp256k1 wallet (lowercase 0x address + 0x key).
+pub fn generate_wallet() -> DwcWallet {
+    let mut rng = rand::rng();
+    loop {
+        let mut bytes = [0u8; 32];
+        rng.fill_bytes(&mut bytes);
+        if let Ok(wallet) = LocalWallet::from_bytes(&bytes) {
+            return DwcWallet {
+                address: format!("{:#x}", wallet.address()),
+                private_key: format!("0x{}", hex_lower(&bytes)),
+            };
+        }
+    }
+}
+
+/// Load wallets from a JSON file, generating and appending fresh ones until
+/// there are at least `count`. Creates the file if missing.
+///
+/// **The file stores private keys in plaintext** — it is the only way to spend
+/// DWC paid to these addresses, so keep it private and backed up.
+pub fn load_or_create_wallets(
+    path: impl AsRef<std::path::Path>,
+    count: usize,
+) -> Result<Vec<DwcWallet>, MiningError> {
+    let path = path.as_ref();
+    let mut wallets: Vec<DwcWallet> = match std::fs::read_to_string(path) {
+        Ok(text) if !text.trim().is_empty() => serde_json::from_str(&text)?,
+        Ok(_) => Vec::new(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(MiningError::Io(error)),
+    };
+    let mut changed = false;
+    while wallets.len() < count {
+        wallets.push(generate_wallet());
+        changed = true;
+    }
+    if changed {
+        std::fs::write(path, serde_json::to_string_pretty(&wallets)?)?;
+    }
+    Ok(wallets)
 }
 
 /// Blocking HTTP client for `https://digitalwatercoin.com/api`.
