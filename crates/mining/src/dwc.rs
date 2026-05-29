@@ -22,6 +22,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use rand::Rng;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -510,9 +511,42 @@ pub struct DwcStats {
     pub unpaid_shares: u64,
 }
 
+fn build_dwc_http_client(proxy_url: Option<&str>) -> Result<reqwest::blocking::Client, MiningError> {
+    let mut builder = reqwest::blocking::Client::builder()
+        .user_agent("Mozilla/5.0 (compatible; dwcmine/0.1)")
+        // Force a fresh upstream connection per request so a rotating
+        // residential proxy hands out a new exit IP every submit.
+        .pool_max_idle_per_host(0);
+    if let Some(proxy_url) = proxy_url {
+        builder = builder.proxy(reqwest::Proxy::all(proxy_url)?);
+    }
+    Ok(builder.build()?)
+}
+
+/// Load a proxy list file: one proxy URL per line (e.g.
+/// `http://user:pass@host:port`), blank lines and `#` comments ignored.
+pub fn load_proxy_file(path: impl AsRef<std::path::Path>) -> Result<Vec<String>, MiningError> {
+    let contents = match std::fs::read_to_string(path.as_ref()) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(MiningError::Io(error)),
+    };
+    Ok(contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_string)
+        .collect())
+}
+
 /// Blocking HTTP client for `https://digitalwatercoin.com/api`.
+///
+/// When built with a proxy pool, every request randomly picks one proxy, so
+/// submissions come from a different IP each time (mirrors the RPOW proxy
+/// pool). With no proxies it talks directly.
 pub struct DwcClient {
-    http: reqwest::blocking::Client,
+    direct: reqwest::blocking::Client,
+    proxies: Vec<reqwest::blocking::Client>,
     base: String,
 }
 
@@ -522,27 +556,54 @@ impl DwcClient {
     }
 
     pub fn with_base(base: impl Into<String>) -> Result<Self, MiningError> {
-        let http = reqwest::blocking::Client::builder()
-            .user_agent("Mozilla/5.0 (compatible; dwcmine/0.1)")
-            .build()?;
+        Self::with_base_and_proxies(base, &[])
+    }
+
+    pub fn with_base_and_proxies(
+        base: impl Into<String>,
+        proxy_urls: &[String],
+    ) -> Result<Self, MiningError> {
+        let direct = build_dwc_http_client(None)?;
+        let proxies = proxy_urls
+            .iter()
+            .map(|url| url.trim())
+            .filter(|url| !url.is_empty())
+            .map(|url| build_dwc_http_client(Some(url)))
+            .collect::<Result<Vec<_>, MiningError>>()?;
         Ok(Self {
-            http,
+            direct,
+            proxies,
             base: base.into().trim_end_matches('/').to_string(),
         })
     }
 
+    pub fn proxy_count(&self) -> usize {
+        self.proxies.len()
+    }
+
+    /// Randomly select a proxy client for this request (or the direct client
+    /// when no proxies are configured).
+    fn pick(&self) -> &reqwest::blocking::Client {
+        if self.proxies.is_empty() {
+            &self.direct
+        } else {
+            let index = rand::rng().random_range(0..self.proxies.len());
+            &self.proxies[index]
+        }
+    }
+
     pub fn config(&self) -> Result<DwcConfig, MiningError> {
         let url = format!("{}/mine/config", self.base);
-        decode(self.http.get(url).send()?)
+        decode(self.pick().get(url).send()?)
     }
 
     pub fn stats(&self, address: &str) -> Result<DwcStats, MiningError> {
         let url = format!("{}/mine/stats/{}", self.base, address);
-        decode(self.http.get(url).send()?)
+        decode(self.pick().get(url).send()?)
     }
 
-    /// Submit a share. Returns the raw JSON body so callers can inspect
-    /// acceptance / updated share counts without a fixed schema.
+    /// Submit a share through a randomly-selected proxy IP. Returns the raw
+    /// JSON body so callers can inspect acceptance / updated share counts.
     pub fn submit(
         &self,
         address: &str,
@@ -555,7 +616,7 @@ impl DwcClient {
             "epoch": epoch,
             "nonce": nonce,
         });
-        decode(self.http.post(url).json(&body).send()?)
+        decode(self.pick().post(url).json(&body).send()?)
     }
 }
 

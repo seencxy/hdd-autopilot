@@ -68,16 +68,36 @@ fn run() -> Result<(), Box<dyn Error>> {
     // would mine shares the server rejects with "Hash does not meet difficulty".
     let address = address.to_lowercase();
 
-    let client = DwcClient::with_base(&args.api_base)?;
+    let proxies = match &args.proxies {
+        Some(path) => mining::dwc::load_proxy_file(path)?,
+        None => Vec::new(),
+    };
+    if args.proxies.is_some() && proxies.is_empty() {
+        return Err(format!(
+            "--proxies file {:?} had no usable proxy lines",
+            args.proxies.as_deref().unwrap_or("")
+        )
+        .into());
+    }
+    let client = DwcClient::with_base_and_proxies(&args.api_base, &proxies)?;
     let mut config = client.config()?;
     let mut config_fetched = Instant::now();
     let difficulty = args.difficulty.unwrap_or(config.difficulty.max(1));
 
     let backend_label = if args.cpu_only { "cpu" } else { "cuda→metal→cpu" };
     println!(
-        "address={address} api={} backend={backend_label} difficulty={difficulty} submit={}",
-        args.api_base, args.submit
+        "address={address} api={} backend={backend_label} difficulty={difficulty} submit={} proxies={}",
+        args.api_base,
+        args.submit,
+        client.proxy_count()
     );
+    if client.proxy_count() > 0 {
+        println!(
+            "routing every request through a random proxy from {} ({} entries)",
+            args.proxies.as_deref().unwrap_or(""),
+            client.proxy_count()
+        );
+    }
     println!(
         "server epoch={} epochMs={} server difficulty={} prefix=\"{}\"",
         config.epoch, config.epoch_ms, config.difficulty, config.prefix
@@ -266,6 +286,7 @@ struct Args {
     once: bool,
     max_shares: Option<u64>,
     min_submit_interval_ms: u64,
+    proxies: Option<String>,
 }
 
 impl Default for Args {
@@ -284,6 +305,7 @@ impl Default for Args {
             once: false,
             max_shares: None,
             min_submit_interval_ms: 0,
+            proxies: None,
         }
     }
 }
@@ -316,6 +338,9 @@ impl Args {
                 "--min-submit-interval-ms" => {
                     args.min_submit_interval_ms =
                         parse_u64(next(&raw, &mut index, "--min-submit-interval-ms")?)?
+                }
+                "--proxies" | "--proxy-file" => {
+                    args.proxies = Some(next(&raw, &mut index, "--proxies")?.to_string())
                 }
                 unknown => return Err(format!("unknown argument: {unknown}").into()),
             }
@@ -369,6 +394,7 @@ Options:
   --once                   mine and report a single share, then exit
   --max-shares N           stop after N shares
   --min-submit-interval-ms N  minimum spacing between submits (be polite)
+  --proxies FILE           proxy list (one URL/line); each request picks a random one
   --api-base URL           API base (default https://digitalwatercoin.com/api)
 "#
     );
