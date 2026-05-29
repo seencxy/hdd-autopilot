@@ -11,8 +11,8 @@
 
 use std::env;
 use std::error::Error;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use mining::dwc::{
@@ -268,19 +268,13 @@ fn run_single(args: &Args) -> Result<(), Box<dyn Error>> {
     );
     Ok(())
 }
-
-/// Multi-address mode: generate/load many wallets and mine them concurrently.
-/// Each worker thread owns one address at a time, mines+submits shares for it,
-/// and rotates to the next address as soon as that one is full (daily cap) or
-/// rate-limited (429). Mining only one share at a time per worker means no
-/// hash power is spent on shares that can't be submitted.
+/// Multi-address mode: mine auto-generated wallets concurrently and, the
+/// instant an address fills its daily cap (or is rate-limited), replace it
+/// with a brand-new wallet — running indefinitely. Each new wallet is appended
+/// to the store file as it is created (private keys saved so DWC stays
+/// spendable). Mining one share at a time per worker wastes no hash power, and
+/// the running wallet count is reported.
 fn run_multi(args: &Args) -> Result<(), Box<dyn Error>> {
-    let wallets = mining::dwc::load_or_create_wallets(&args.wallets, args.addresses)?;
-    let addresses: Vec<String> = wallets.iter().map(|w| w.address.clone()).collect();
-    if addresses.is_empty() {
-        return Err("no wallets available; set --addresses N (> 0)".into());
-    }
-
     let proxies = match &args.proxies {
         Some(path) => mining::dwc::load_proxy_file(path)?,
         None => Vec::new(),
@@ -299,38 +293,60 @@ fn run_multi(args: &Args) -> Result<(), Box<dyn Error>> {
         .unwrap_or_else(|_| current_epoch() as i64);
     let epoch_offset: i64 = server_epoch - current_epoch() as i64;
 
+    // Optional cap on wallets created this run (0 = unlimited). In dry-run we
+    // bound it so we don't spin generating wallets forever.
+    let mut max_new = args.max_addresses;
+    if !args.submit && max_new == 0 {
+        max_new = args.concurrency.max(1) as u64;
+    }
+
+    let existing = mining::dwc::load_wallets(&args.wallets)?.len() as u64;
+
     println!(
-        "multi-address mode: wallets={} (file {}), concurrency={}, difficulty={}, submit={}, proxies={}",
-        addresses.len(),
-        args.wallets,
+        "multi-address mode: concurrency={}, difficulty={}, submit={}, proxies={}, new-wallet cap={}",
         args.concurrency,
         difficulty,
         args.submit,
-        client.proxy_count()
+        client.proxy_count(),
+        if max_new == 0 {
+            "unlimited".to_string()
+        } else {
+            max_new.to_string()
+        }
     );
     println!(
-        "⚠ private keys are stored in {} — keep it safe and backed up; it's the only way to spend mined DWC.",
-        args.wallets
+        "wallet store: {} ({} already saved) — ⚠ plaintext private keys; keep it safe & backed up to spend mined DWC",
+        args.wallets, existing
     );
-    println!("mining backend: {}", if args.gpu { "gpu (shared)" } else { "cpu (1 thread/worker)" });
+    println!(
+        "mining backend: {}",
+        if args.gpu {
+            "gpu (shared)"
+        } else {
+            "cpu (1 thread/worker)"
+        }
+    );
     if !args.submit {
         println!("(dry run — shares verified locally but NOT submitted; pass --submit to credit them)");
     }
 
-    let addresses = Arc::new(addresses);
-    let claim = Arc::new(AtomicUsize::new(0));
+    let book = Arc::new(Mutex::new(WalletBook {
+        path: args.wallets.clone(),
+        created: 0,
+    }));
     let cancel = Arc::new(AtomicBool::new(false));
     let total_found = Arc::new(AtomicU64::new(0));
     let total_submitted = Arc::new(AtomicU64::new(0));
-    let addrs_done = Arc::new(AtomicU64::new(0));
+    let active = Arc::new(AtomicU64::new(0));
+    let created_count = Arc::new(AtomicU64::new(0));
     let run_start = Instant::now();
 
     let reporter = {
         let total_found = Arc::clone(&total_found);
         let total_submitted = Arc::clone(&total_submitted);
-        let addrs_done = Arc::clone(&addrs_done);
+        let created_count = Arc::clone(&created_count);
+        let active = Arc::clone(&active);
         let cancel = Arc::clone(&cancel);
-        let total_addrs = addresses.len();
         std::thread::spawn(move || {
             while !cancel.load(Ordering::SeqCst) {
                 std::thread::sleep(Duration::from_secs(5));
@@ -340,9 +356,9 @@ fn run_multi(args: &Args) -> Result<(), Box<dyn Error>> {
                 let secs = run_start.elapsed().as_secs_f64().max(0.001);
                 let submitted = total_submitted.load(Ordering::Relaxed);
                 println!(
-                    "[stats] addrs_done={}/{} found={} submitted={} rate={:.1} shares/s elapsed={:.0}s",
-                    addrs_done.load(Ordering::Relaxed),
-                    total_addrs,
+                    "[stats] wallets_created={} active={} found={} submitted={} rate={:.1} shares/s elapsed={:.0}s",
+                    created_count.load(Ordering::Relaxed),
+                    active.load(Ordering::Relaxed),
                     total_found.load(Ordering::Relaxed),
                     submitted,
                     submitted as f64 / secs,
@@ -355,12 +371,12 @@ fn run_multi(args: &Args) -> Result<(), Box<dyn Error>> {
     let handles: Vec<_> = (0..args.concurrency.max(1))
         .map(|_| {
             let client = Arc::clone(&client);
-            let addresses = Arc::clone(&addresses);
-            let claim = Arc::clone(&claim);
+            let book = Arc::clone(&book);
             let cancel = Arc::clone(&cancel);
             let total_found = Arc::clone(&total_found);
             let total_submitted = Arc::clone(&total_submitted);
-            let addrs_done = Arc::clone(&addrs_done);
+            let active = Arc::clone(&active);
+            let created_count = Arc::clone(&created_count);
             let submit = args.submit;
             let prefer_gpu = args.gpu;
             let min_interval = args.min_submit_interval_ms;
@@ -370,24 +386,39 @@ fn run_multi(args: &Args) -> Result<(), Box<dyn Error>> {
                     if cancel.load(Ordering::SeqCst) {
                         break;
                     }
-                    let idx = claim.fetch_add(1, Ordering::Relaxed);
-                    if idx >= addresses.len() {
+                    if max_new != 0 && created_count.load(Ordering::Relaxed) >= max_new {
                         break;
                     }
-                    let address = addresses[idx].clone();
+                    // Create + persist a fresh wallet under the lock.
+                    let (wallet, n) = {
+                        let mut book = book.lock().unwrap();
+                        if max_new != 0 && book.created >= max_new {
+                            break;
+                        }
+                        match book.create() {
+                            Ok(pair) => pair,
+                            Err(error) => {
+                                eprintln!("wallet create failed: {error}");
+                                break;
+                            }
+                        }
+                    };
+                    created_count.store(n, Ordering::Relaxed);
+                    active.fetch_add(1, Ordering::Relaxed);
+                    println!("[wallet #{}] {} — mining", existing + n, wallet.address);
+
                     let salt = random_salt(&mut rng);
                     let mut counter = 0u64;
                     let mut errors = 0u32;
                     let mut addr_shares = 0u64;
-                    // Safety bound in case a submit response ever omits the
-                    // remaining-cap field, so we never mine one address forever.
+                    // Safety bound if a submit response ever omits the cap field.
                     const MAX_SHARES_PER_ADDRESS: u64 = 1000;
                     loop {
                         if cancel.load(Ordering::SeqCst) {
                             break;
                         }
                         let epoch = ((current_epoch() as i64) + epoch_offset).to_string();
-                        let job = DwcJob::new(&address, &epoch, &salt, difficulty);
+                        let job = DwcJob::new(&wallet.address, &epoch, &salt, difficulty);
                         let mine_config = DwcMineConfig {
                             start_counter: counter,
                             counter_count: u64::MAX - counter,
@@ -404,27 +435,36 @@ fn run_multi(args: &Args) -> Result<(), Box<dyn Error>> {
                         addr_shares += 1;
                         total_found.fetch_add(1, Ordering::Relaxed);
                         if !submit {
-                            // Dry run: prove a few shares per address, then rotate.
                             if addr_shares >= 3 {
                                 break;
                             }
                             continue;
                         }
-                        match client.submit(&address, &epoch, &share.nonce) {
+                        match client.submit(&wallet.address, &epoch, &share.nonce) {
                             Ok(body) => {
                                 errors = 0;
                                 total_submitted.fetch_add(1, Ordering::Relaxed);
                                 if body.get("dailyAddrRemaining").and_then(|v| v.as_i64())
                                     == Some(0)
                                 {
-                                    break; // address full → next
+                                    println!(
+                                        "[wallet #{}] {} — full ({} shares today), creating next",
+                                        existing + n,
+                                        wallet.address,
+                                        addr_shares
+                                    );
+                                    break;
                                 }
                             }
                             Err(error) => {
                                 errors += 1;
                                 let msg = error.to_string();
-                                // 429 / cap / repeated failure → give up this address.
                                 if msg.contains("429") || msg.contains("limit") || errors >= 3 {
+                                    println!(
+                                        "[wallet #{}] {} — limited/error, creating next",
+                                        existing + n,
+                                        wallet.address
+                                    );
                                     break;
                                 }
                             }
@@ -436,7 +476,7 @@ fn run_multi(args: &Args) -> Result<(), Box<dyn Error>> {
                             std::thread::sleep(Duration::from_millis(min_interval));
                         }
                     }
-                    addrs_done.fetch_add(1, Ordering::Relaxed);
+                    active.fetch_sub(1, Ordering::Relaxed);
                 }
             })
         })
@@ -451,19 +491,31 @@ fn run_multi(args: &Args) -> Result<(), Box<dyn Error>> {
     let secs = run_start.elapsed().as_secs_f64().max(0.001);
     let submitted = total_submitted.load(Ordering::Relaxed);
     println!(
-        "done: addresses={} found={} submitted={} rate={:.1} shares/s elapsed={:.0}s",
-        addresses.len(),
+        "done: wallets_created={} (total in store {}) found={} submitted={} rate={:.1} shares/s elapsed={:.0}s",
+        created_count.load(Ordering::Relaxed),
+        existing + created_count.load(Ordering::Relaxed),
         total_found.load(Ordering::Relaxed),
         submitted,
         submitted as f64 / secs,
         secs
     );
-    if args.submit {
-        println!(
-            "all addresses processed; raise --addresses or run again tomorrow for more (daily cap is per address)."
-        );
-    }
     Ok(())
+}
+
+/// Wallet store guarded across workers; creating a wallet generates a keypair
+/// and appends it to the store file before returning.
+struct WalletBook {
+    path: String,
+    created: u64,
+}
+
+impl WalletBook {
+    fn create(&mut self) -> Result<(mining::dwc::DwcWallet, u64), Box<dyn Error>> {
+        let wallet = mining::dwc::generate_wallet();
+        mining::dwc::append_wallet(&self.path, &wallet)?;
+        self.created += 1;
+        Ok((wallet, self.created))
+    }
 }
 
 fn random_salt(rng: &mut impl RngCore) -> String {
@@ -497,7 +549,7 @@ struct Args {
     min_submit_interval_ms: u64,
     proxies: Option<String>,
     wallets: String,
-    addresses: usize,
+    max_addresses: u64,
     concurrency: usize,
     gpu: bool,
 }
@@ -519,8 +571,8 @@ impl Default for Args {
             max_shares: None,
             min_submit_interval_ms: 0,
             proxies: None,
-            wallets: "dwc-wallets.json".to_string(),
-            addresses: 100,
+            wallets: "dwc-wallets.jsonl".to_string(),
+            max_addresses: 0,
             concurrency: 16,
             gpu: false,
         }
@@ -562,8 +614,8 @@ impl Args {
                 "--wallets" | "--wallets-file" => {
                     args.wallets = next(&raw, &mut index, "--wallets")?.to_string()
                 }
-                "--addresses" | "--wallet-count" => {
-                    args.addresses = parse_usize(next(&raw, &mut index, "--addresses")?)?
+                "--max-addresses" | "--addresses" => {
+                    args.max_addresses = parse_u64(next(&raw, &mut index, "--max-addresses")?)?
                 }
                 "--concurrency" | "--workers" => {
                     args.concurrency = parse_usize(next(&raw, &mut index, "--concurrency")?)?
@@ -612,10 +664,12 @@ multi-address mode farms many auto-generated wallets concurrently, rotating to
 the next address as soon as one is full.
 
 Multi-address options (used when --address is omitted):
-  --wallets FILE           wallet store JSON (default dwc-wallets.json); private
-                           keys saved here — keep it safe to spend mined DWC
-  --addresses N            ensure at least N wallets exist (default 100)
-  --concurrency N          worker threads / addresses mined at once (default 16)
+  Runs forever: mines a wallet until its daily cap (200) is hit, then creates a
+  brand-new wallet to replace it. Stop with Ctrl-C.
+  --wallets FILE           wallet store, JSON-lines (default dwc-wallets.jsonl);
+                           private keys appended here — keep it safe to spend DWC
+  --concurrency N          addresses mined at once / worker threads (default 16)
+  --max-addresses N        stop after creating N new wallets (default 0 = unlimited)
   --gpu                    mine on the GPU (shared); default is CPU 1-thread/worker
 
 Single-address options:

@@ -570,31 +570,43 @@ pub fn generate_wallet() -> DwcWallet {
     }
 }
 
-/// Load wallets from a JSON file, generating and appending fresh ones until
-/// there are at least `count`. Creates the file if missing.
+/// Load previously generated wallets from a store file. Accepts both the
+/// newline-delimited JSON (one wallet per line) written by [`append_wallet`]
+/// and a legacy JSON array. Missing file → empty list.
 ///
 /// **The file stores private keys in plaintext** — it is the only way to spend
 /// DWC paid to these addresses, so keep it private and backed up.
-pub fn load_or_create_wallets(
-    path: impl AsRef<std::path::Path>,
-    count: usize,
-) -> Result<Vec<DwcWallet>, MiningError> {
-    let path = path.as_ref();
-    let mut wallets: Vec<DwcWallet> = match std::fs::read_to_string(path) {
-        Ok(text) if !text.trim().is_empty() => serde_json::from_str(&text)?,
-        Ok(_) => Vec::new(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+pub fn load_wallets(path: impl AsRef<std::path::Path>) -> Result<Vec<DwcWallet>, MiningError> {
+    let text = match std::fs::read_to_string(path.as_ref()) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(MiningError::Io(error)),
     };
-    let mut changed = false;
-    while wallets.len() < count {
-        wallets.push(generate_wallet());
-        changed = true;
+    if text.trim_start().starts_with('[') {
+        return Ok(serde_json::from_str(text.trim())?);
     }
-    if changed {
-        std::fs::write(path, serde_json::to_string_pretty(&wallets)?)?;
+    let mut wallets = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if !line.is_empty() {
+            wallets.push(serde_json::from_str(line)?);
+        }
     }
     Ok(wallets)
+}
+
+/// Append one wallet to the store as a JSON line (crash-safe O(1) append).
+pub fn append_wallet(
+    path: impl AsRef<std::path::Path>,
+    wallet: &DwcWallet,
+) -> Result<(), MiningError> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path.as_ref())?;
+    writeln!(file, "{}", serde_json::to_string(wallet)?).map_err(MiningError::Io)?;
+    Ok(())
 }
 
 /// Blocking HTTP client for `https://digitalwatercoin.com/api`.
